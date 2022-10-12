@@ -1,0 +1,4 @@
+# Sample configuration for multi-robot connection
+Kortex:
+  kinova: # Name of the robot in the controller
+    ip: 192.168.1.10
