@@ -16,6 +16,8 @@
 
 #include <google/protobuf/util/json_util.h>
 
+#define GEAR_RATIO 100.0
+
 namespace k_api = Kinova::Api;
 
 namespace mc_kinova
@@ -43,6 +45,8 @@ private:
 
     std::string m_name;
     int m_actuator_count;
+
+    int64_t m_dt;
     
     int m_control_id;
     int m_prev_control_id;
@@ -58,37 +62,79 @@ private:
     int m_control_mode_id;
     int m_prev_control_mode_id;
 
+    bool m_use_filtered_velocities;
+    double m_velocity_filter_ratio;
+    std::vector<double> m_filtered_velocities;
+
+    // ===== Custom torque control properties =====
+    bool m_use_custom_torque_control;
+
+    double m_mu;
+    double m_friction_vel_threshold;
+    double m_friction_accel_threshold;
+    std::vector<double> m_friction_values;
+    std::vector<double> m_integral_gains;
+
+    std::vector<double> m_torque_error_sum;
+    std::vector<double> m_torque_error;
+    std::vector<double> m_integral_fast_filter;
+    std::vector<double> m_integral_slow_filter;
+    std::vector<double> m_integral_term_command;
+    std::vector<double> m_current_command;
+    std::vector<double> m_jac_transpose_f;
+    std::vector<double> m_friction_compensation_mode;
+    std::vector<double> m_offsets;
+    rbd::Jacobian m_jac;
+
 public:
     KinovaRobot(const std::string& name, const std::string& ip_address, const std::string& username, const std::string& password);
     ~KinovaRobot();
 
     // ============================== Getter ============================== //
     std::vector<double> getJointPosition(void);
+    std::string getName(void);
 
     // ============================== Setter ============================== //
     void setLowServoingMode(void);
     void setSingleServoingMode(void);
+    void setCustomTorque(mc_rtc::Configuration & torque_config);
     void setControlMode(std::string mode);
 
-    // Initialize connection to the robot
-    void init(mc_control::MCGlobalController & gc);
+    void init(mc_control::MCGlobalController & gc, mc_rtc::Configuration & kortexConfig); // Initialize connection to the robot
+    void addLogEntry(mc_control::MCGlobalController & gc);
+    void removeLogEntry(mc_control::MCGlobalController & gc);
+    
     void updateState(void);
-    void updateState(const Kinova::Api::Error &err, const k_api::BaseCyclic::Feedback data);
-    bool sendCommand(mc_rbdyn::Robot & robot);
+    void updateState(const k_api::BaseCyclic::Feedback data);
+    bool sendCommand(mc_rbdyn::Robot & robot, bool & running);
     void updateSensors(mc_control::MCGlobalController & gc);
     void updateControl(mc_control::MCGlobalController & controller);
+
+    double currentTorqueControlLaw(mc_rbdyn::Robot & robot, k_api::BaseCyclic::Feedback m_state_local, Eigen::MatrixXd jacobian, double joint_idx);
+    void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
+    void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
+    std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
+    std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
 
     void controlThread(mc_control::MCGlobalController & controller, std::mutex & startM, std::condition_variable & startCV, bool & start, bool & running);
     void moveToHomePosition(void);
 
+    std::string controlLoopParamToString(k_api::ActuatorConfig::LoopSelection & loop_selected, int actuator_idx);
+
     void printState(void);
+    void printJointActiveControlLoop(int joint_id);
 
     // ============================== Private methods ============================== //
 private:
-    double jointPoseToRad(int joint_id, double deg);
-    double radToJointPose(int joint_id, double rad);
+    void addGui(mc_control::MCGlobalController & gc);
+    void removeGui(mc_control::MCGlobalController & gc);
+
+    double jointPoseToRad(int joint_idx, double deg);
+    double radToJointPose(int joint_idx, double rad);
+    std::vector<double> computePostureTaskOffset(mc_rbdyn::Robot & robot, mc_tasks::PostureTaskPtr posture_task);
     uint32_t jointIdFromCommandID(google::protobuf::uint32 cmd_id);
     int64_t GetTickUs(void);
+    void printError(const k_api::Error & err);
     void printException(k_api::KDetailedException & ex);
     std::function<void(k_api::Base::ActionNotification)> check_for_end_or_abort(bool& finished);
 };

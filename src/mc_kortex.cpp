@@ -67,7 +67,7 @@ void * global_thread_init(mc_control::MCGlobalController::GlobalConfiguration & 
     }
     for(auto & kinova : kinovas)
     {
-        kinova->init(controller);
+        kinova->init(controller,kortexConfig);
     }
     std::vector<double> qInit = robots.robot().encoderValues();
     mc_rtc::log::info("qInit = {}", mc_kinova::printVec(qInit));

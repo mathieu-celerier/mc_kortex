@@ -1,4 +1,18 @@
 # Sample configuration for multi-robot connection
 Kortex:
+  filter_velocity:
+    ratio: 0.97
+  torque_control:
+    mode: custom # If want to use modified control loop
+    friction_compensation:
+      velocity_threshold: 0.034906585 # in rad
+      acceleration_threshold: 0.5 # in rad, for cases where velocity is below threshold
+      compensation_values: [2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8]
+    integral_term:
+      mu: 0.9
+      gains: [10.0, 10.0, 10.0, 10.0, 300.0, 400.0, 800.0]
+
   kinova: # Name of the robot in the controller
     ip: 192.168.1.10
+    username: your_username
+    password: your_password
