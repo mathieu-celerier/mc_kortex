@@ -3,6 +3,7 @@
 #include <mc_control/mc_global_controller.h>
 
 #include <chrono>
+#include <boost/circular_buffer.hpp>
 
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
@@ -62,6 +63,8 @@ private:
     int m_control_mode_id;
     int m_prev_control_mode_id;
 
+    std::vector<double> m_init_posture;
+
     bool m_use_filtered_velocities;
     double m_velocity_filter_ratio;
     std::vector<double> m_filtered_velocities;
@@ -69,22 +72,29 @@ private:
     // ===== Custom torque control properties =====
     bool m_use_custom_torque_control;
 
+    std::vector<double> m_offsets;
+
     double m_mu;
     double m_friction_vel_threshold;
     double m_friction_accel_threshold;
     std::vector<double> m_friction_values;
-    std::vector<double> m_integral_gains;
+    std::vector<double> m_friction_compensation_mode;
 
-    std::vector<double> m_torque_error_sum;
     std::vector<double> m_torque_error;
+
+    std::vector<double> m_integral_gains;
+    std::vector<double> m_torque_error_sum;
     std::vector<double> m_integral_fast_filter;
     std::vector<double> m_integral_slow_filter;
     std::vector<double> m_integral_term_command;
-    std::vector<double> m_current_command;
     std::vector<double> m_jac_transpose_f;
-    std::vector<double> m_friction_compensation_mode;
-    std::vector<double> m_offsets;
     rbd::Jacobian m_jac;
+
+    std::vector<boost::circular_buffer<double>> m_filter_input_buffer;
+    std::vector<boost::circular_buffer<double>> m_filter_output_buffer;
+    std::vector<double> m_filter_command;
+
+    std::vector<double> m_current_command;
 
 public:
     KinovaRobot(const std::string& name, const std::string& ip_address, const std::string& username, const std::string& password);
@@ -104,7 +114,8 @@ public:
     void addLogEntry(mc_control::MCGlobalController & gc);
     void removeLogEntry(mc_control::MCGlobalController & gc);
     
-    void updateState(void);
+    void updateState();
+    void updateState(bool & running);
     void updateState(const k_api::BaseCyclic::Feedback data);
     bool sendCommand(mc_rbdyn::Robot & robot, bool & running);
     void updateSensors(mc_control::MCGlobalController & gc);
@@ -118,6 +129,7 @@ public:
 
     void controlThread(mc_control::MCGlobalController & controller, std::mutex & startM, std::condition_variable & startCV, bool & start, bool & running);
     void moveToHomePosition(void);
+    void moveToInitPosition(void);
 
     std::string controlLoopParamToString(k_api::ActuatorConfig::LoopSelection & loop_selected, int actuator_idx);
 
@@ -126,6 +138,8 @@ public:
 
     // ============================== Private methods ============================== //
 private:
+    void initFiltersBuffers(void);
+
     void addGui(mc_control::MCGlobalController & gc);
     void removeGui(mc_control::MCGlobalController & gc);
 
@@ -137,6 +151,7 @@ private:
     void printError(const k_api::Error & err);
     void printException(k_api::KDetailedException & ex);
     std::function<void(k_api::Base::ActionNotification)> check_for_end_or_abort(bool& finished);
+    std::function<void(k_api::Base::ActionNotification)> create_event_listener_by_promise(std::promise<k_api::Base::ActionEvent>& finish_promise_cart);
 };
 
 using KinovaRobotPtr = std::unique_ptr<KinovaRobot>;

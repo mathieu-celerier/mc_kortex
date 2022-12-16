@@ -1,5 +1,8 @@
 # Sample configuration for multi-robot connection
 Kortex:
+  init_posture:
+    on_startup: false
+    posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
   filter_velocity:
     ratio: 0.97
   torque_control:

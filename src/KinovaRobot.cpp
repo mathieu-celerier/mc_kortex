@@ -111,7 +111,7 @@ void KinovaRobot::setCustomTorque(mc_rtc::Configuration & torque_config)
         }
         else
         {
-            m_friction_vel_threshold = 0.034906585;
+            m_friction_vel_threshold = 0.1;
         }
 
         if(torque_config("friction_compensation").has("acceleration_threshold"))
@@ -120,7 +120,7 @@ void KinovaRobot::setCustomTorque(mc_rtc::Configuration & torque_config)
         }
         else
         {
-            m_friction_accel_threshold = 0.5;
+            m_friction_accel_threshold = 100;
         }
     }
     else
@@ -164,6 +164,7 @@ void KinovaRobot::setControlMode(std::string mode)
     if(mode.compare("Position") == 0)
     {
         if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION) return;
+
         // mc_rtc::log::info("[mc_kortex] Using position control");
         m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
         m_control_mode_id++;
@@ -172,6 +173,7 @@ void KinovaRobot::setControlMode(std::string mode)
     if(mode.compare("Velocity") == 0)
     {
         if (m_control_mode == k_api::ActuatorConfig::ControlMode::VELOCITY) return;
+
         // mc_rtc::log::info("[mc_kortex] Using velocity control");
         m_control_mode = k_api::ActuatorConfig::ControlMode::VELOCITY;
         m_control_mode_id++;
@@ -182,7 +184,9 @@ void KinovaRobot::setControlMode(std::string mode)
         if (m_use_custom_torque_control)
         {
             if (m_control_mode == k_api::ActuatorConfig::ControlMode::CURRENT) return;
+
             // mc_rtc::log::info("[mc_kortex] Using torque control");
+            initFiltersBuffers();
             m_control_mode = k_api::ActuatorConfig::ControlMode::CURRENT;
             m_control_mode_id++;
             return;
@@ -190,6 +194,7 @@ void KinovaRobot::setControlMode(std::string mode)
         else
         {
             if (m_control_mode == k_api::ActuatorConfig::ControlMode::TORQUE) return;
+
             // mc_rtc::log::info("[mc_kortex] Using torque control");
             m_control_mode = k_api::ActuatorConfig::ControlMode::TORQUE;
             m_control_mode_id++;
@@ -243,6 +248,32 @@ void KinovaRobot::init(mc_control::MCGlobalController & gc, mc_rtc::Configuratio
     controle_mode.set_control_mode(m_control_mode);
     for(int i = 0; i < m_actuator_count; i++) m_actuator_config->SetControlMode(controle_mode,i+1);
 
+    // Init pose if desired
+    if(kortexConfig.has("init_posture"))
+    {
+        if(kortexConfig("init_posture").has("posture"))
+        {
+            m_init_posture = kortexConfig("init_posture")("posture");
+            if (!m_init_posture.size() == m_actuator_count) mc_rtc::log::error_and_throw<std::runtime_error>("[MC_KORTEX] for {} robot, value for \"posture\" key does not match actuators count.\nActuators count = ",m_name,m_actuator_count);
+        }
+
+        if(kortexConfig("init_posture")("on_startup",false))
+        {
+            moveToInitPosition();
+        }
+    }
+    else
+    {
+        m_init_posture.resize(m_actuator_count);
+
+        auto joints_feedback = m_base->GetMeasuredJointAngles();
+        for (size_t i = 0; i < m_actuator_count; i++)
+        {
+            auto joint_feedback = joints_feedback.joint_angles(i);
+            m_init_posture[joint_feedback.joint_identifier()-1] = joint_feedback.value();
+        }
+    }
+
     // Initialize state
     updateState();
     updateSensors(gc);
@@ -276,6 +307,7 @@ void KinovaRobot::init(mc_control::MCGlobalController & gc, mc_rtc::Configuratio
     // Initialize each actuator to its current position
     for(int i = 0; i < m_actuator_count; i++) m_base_command.add_actuators()->set_position(m_state.actuators(i).position());
 
+    m_filter_command.assign(m_actuator_count,0.0);
     m_current_command.assign(m_actuator_count,0.0);
     m_torque_error_sum.assign(m_actuator_count,0.0);
     m_torque_error.assign(m_actuator_count,0.0);
@@ -347,6 +379,23 @@ void KinovaRobot::updateState()
     m_state = m_base_cyclic->RefreshFeedback();
 }
 
+void KinovaRobot::updateState(bool & running)
+{
+    m_base_cyclic->RefreshFeedback_callback(
+        [&, this](const Kinova::Api::Error &err, const k_api::BaseCyclic::Feedback data)
+        {
+            updateState(data);
+            checkBaseFaultBanks(data.base().fault_bank_a(),data.base().fault_bank_b());
+            // checkActuatorsFaultBanks(data);
+            if(err.error_code() != k_api::ErrorCodes::ERROR_NONE)
+            {
+                printError(err);
+                running = false;
+            }
+        }
+    );
+}
+
 void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data)
 {
     std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
@@ -360,23 +409,14 @@ double KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot & robot, k_api::Base
     double vel = mc_rtc::constants::toRad(m_state_local.mutable_actuators(joint_idx)->velocity());
     double tau_m = m_state_local.mutable_actuators(joint_idx)->torque();
 
-    double ki = m_integral_gains[joint_idx];
-    double fastTimeConstant = 100;
-    double slowTimeConstant = 0.1;
-
     double kt = (joint_idx > 3) ? 0.076 : 0.11;
+    auto x = m_filter_input_buffer[joint_idx];
+    auto y = m_filter_output_buffer[joint_idx];
     double static_friction = 0.0;
     
     double tau_d = m_command.jointTorque[robot.jointIndexByName(rjo[joint_idx])][0];
     double tau_error = tau_d + tau_m;
     m_torque_error[joint_idx] = tau_error;
-
-    double prev_torque_error_sum = m_torque_error_sum[joint_idx];
-    m_torque_error_sum[joint_idx] = m_torque_error_sum[joint_idx]+tau_error*ki*0.001;
-
-    m_integral_fast_filter[joint_idx] = max(min(exp(-fastTimeConstant*0.001)*m_integral_fast_filter[joint_idx] + (m_torque_error_sum[joint_idx] - prev_torque_error_sum),10.0),-10.0);
-    m_integral_slow_filter[joint_idx] = max(min(exp(-slowTimeConstant*0.001)*m_integral_slow_filter[joint_idx] + (m_torque_error_sum[joint_idx] - prev_torque_error_sum),10.0),-10.0);
-    m_integral_term_command[joint_idx] = m_mu*m_integral_fast_filter[joint_idx] + (1-m_mu)*m_integral_slow_filter[joint_idx];
 
     // auto fx = m_state.base().tool_external_wrench_force_x();
     // auto fy = m_state.base().tool_external_wrench_force_y();
@@ -405,17 +445,23 @@ double KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot & robot, k_api::Base
         if (qdd_i_val > m_friction_accel_threshold)
         {
             m_friction_compensation_mode[joint_idx] = 1;
-            static_friction = m_friction_values[joint_idx];
+            static_friction = m_friction_values[joint_idx]*((2/(1+exp(-10.5866096494 *vel)))-1);
         }
         else if (qdd_i_val < -m_friction_accel_threshold)
         {
             m_friction_compensation_mode[joint_idx] = -1;
-            static_friction = -m_friction_values[joint_idx];
+            static_friction = m_friction_values[joint_idx]*((2/(1+exp(-10.5866096494*vel)))-1);
         }
     }
 
+    m_filter_command[joint_idx] = 2.864001*y[0] - 2.730119*y[1] + 0.8661156*y[2] + 0.01993631*tau_error - 0.01862187*x[0] - 0.01993022*x[1] + 0.01862796*x[2];
+    double saturated_filter_command = max(min(m_filter_command[joint_idx]*0.1, 4.0), -4.0);
+
+    m_filter_input_buffer[joint_idx].push_front(tau_error);
+    m_filter_output_buffer[joint_idx].push_front(m_filter_command[joint_idx]);
+
     // double current = (tau_d + static_friction + m_torque_error_sum[joint_idx])/(GEAR_RATIO*kt);
-    double current = (tau_d + static_friction + m_integral_term_command[joint_idx])/(GEAR_RATIO*kt);
+    double current = saturated_filter_command + (tau_d + static_friction)/(GEAR_RATIO*kt);
     m_current_command[joint_idx] = current;
     return current;
 }
@@ -739,8 +785,16 @@ void KinovaRobot::controlThread(mc_control::MCGlobalController & controller, std
             if (now - last < 1000) continue;
             dt = now - last;
             last = now;
-
-            sendCommand(controller.robots().robot(m_name),running);
+            
+            if(m_servoing_mode == k_api::Base::ServoingMode::LOW_LEVEL_SERVOING)
+            {
+                sendCommand(controller.robots().robot(m_name),running);
+            }
+            else
+            {
+                mc_rtc::log::info("high level servoing");
+                // updateState(running);
+            }
         }
         
         removeLogEntry(controller);
@@ -758,6 +812,16 @@ void KinovaRobot::controlThread(mc_control::MCGlobalController & controller, std
     {
         std::cout << "Runtime error: " << ex2.what() << std::endl;
         return_status = false;
+    }
+
+    auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
+    control_mode.set_control_mode(k_api::ActuatorConfig::ControlMode::POSITION);
+
+    for(int i = 0; i < m_actuator_count; i++)
+    {
+        // printJointActiveControlLoop(i+1);
+        m_actuator_config->SetControlMode(control_mode,i+1);
+        // printJointActiveControlLoop(i+1);
     }
 
     setSingleServoingMode();
@@ -811,6 +875,86 @@ void KinovaRobot::moveToHomePosition()
     }
 }
 
+void KinovaRobot::moveToInitPosition()
+{
+    // Make sure the arm is in Single Level Servoing before executing an Action
+    setSingleServoingMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Create trajectory object
+    k_api::Base::WaypointList wpts = k_api::Base::WaypointList();
+    
+    // Define joint poses
+    auto jointPoses = std::vector<std::array<float,7>>();
+    std::array<float, 7> arr;
+    for(size_t i = 0; i < min(m_actuator_count,7); i++) arr[i] = radToJointPose(i, m_init_posture[i]);
+    jointPoses.push_back(arr);
+
+    // Add initial pose as a waypoint
+    k_api::Base::Waypoint *wpt = wpts.add_waypoints();
+    wpt->set_name("waypoint_0");
+    k_api::Base::AngularWaypoint *ang = wpt->mutable_angular_waypoint();
+    for (size_t i = 0; i < m_actuator_count; i++)
+    {
+        ang->add_angles(jointPoses.at(0).at(i));
+    }
+
+    // Connect to notification action topic
+    std::promise<k_api::Base::ActionEvent> finish_promise_cart;
+    auto finish_future_cart = finish_promise_cart.get_future();
+    auto promise_notification_handle_cart = m_base->OnNotificationActionTopic(
+        create_event_listener_by_promise(finish_promise_cart),
+        k_api::Common::NotificationOptions()
+    );
+
+    k_api::Base::WaypointValidationReport result;
+    try
+    {
+        // Verify validity of waypoints
+        auto validationResult = m_base->ValidateWaypointList(wpts);
+        result = validationResult;
+    }
+    catch(k_api::KDetailedException& ex)
+    {
+        mc_rtc::log::error("[mc_kortex] Error on waypoint list to reach initial position");
+        printException(ex);
+        return;
+    }
+
+    // Trajectory error report always exists and we need to make sure no elements are found in order to validate the trajectory
+    if(result.trajectory_error_report().trajectory_error_elements_size() == 0)
+    {
+        // Execute action
+        try
+        {
+            mc_rtc::log::info("[mc_kortex] Moving the arm to initial position");
+        }
+        catch(k_api::KDetailedException& ex)
+        {
+            mc_rtc::log::error("[mc_kortex] Error when trying to execute trajectory to reach initial position");
+            printException(ex);
+            return;
+        }
+        // Wait for future value from promise
+        const auto ang_status = finish_future_cart.wait_for(std::chrono::seconds(100));
+        m_base->Unsubscribe(promise_notification_handle_cart);
+        if (ang_status != std::future_status::ready)
+        {
+            mc_rtc::log::warning("[mc_kortex] Timeout when trying to reach initial position, try again");
+        }
+        else
+        {
+            const auto ang_promise_event = finish_future_cart.get();
+            mc_rtc::log::success("[mc_kortex] Angular waypoint trajectory completed");
+        }
+    }
+    else
+    {
+        mc_rtc::log::error("[mc_kortex] Error found in trajectory to initial position");
+        mc_rtc::log::error(result.trajectory_error_report().DebugString());
+    }
+}
+
 void KinovaRobot::printState()
 {
     std::string serialized_data;
@@ -841,9 +985,25 @@ void KinovaRobot::printJointActiveControlLoop(int joint_id)
 
 // ============================== Private methods ============================== //
 
+void KinovaRobot::initFiltersBuffers()
+{
+    m_filter_input_buffer.assign(m_actuator_count,boost::circular_buffer<double>(3,0.0));
+    m_filter_output_buffer.assign(m_actuator_count,boost::circular_buffer<double>(3,0.0));
+}
+
 void KinovaRobot::addGui(mc_control::MCGlobalController & gc)
 {
-    
+    gc.controller().gui()->addElement({"Kortex",m_name},
+        mc_rtc::gui::Button(
+            "Move to initial position",
+            [this]() {
+                setSingleServoingMode();
+                moveToInitPosition();
+                setLowServoingMode();
+            }
+        )
+    );
+
     gc.controller().gui()->addElement({"Kortex",m_name},
         mc_rtc::gui::ArrayLabel(
             "PostureTask offsets",
@@ -928,19 +1088,19 @@ std::vector<double> KinovaRobot::computePostureTaskOffset(mc_rbdyn::Robot & robo
     auto rjo = robot.refJointOrder();
     
     auto target = posture_task->posture();
-    fmt::print("Posture task stiffness = {}\n",posture_task->stiffness());
+    // fmt::print("Posture task stiffness = {}\n",posture_task->stiffness());
     for (size_t i = 0; i < m_actuator_count; i++)
     {
         double target_pose = target[robot.jointIndexByName(rjo[i])][0];
         double q = jointPoseToRad(i,m_state.mutable_actuators(i)->position());
-        std::cout << target_pose << " " << q << " | ";
+        // std::cout << target_pose << " " << q << " | ";
         if (i%2 == 0)
         {
             if (q > (target_pose + M_PI)) offsets[i] = -2*M_PI;
             else if (q < (target_pose - M_PI)) offsets[i] = 2*M_PI;
         }
     }
-    std::cout << "\n";
+    // std::cout << "\n";
     return offsets;
 }
 
@@ -993,6 +1153,23 @@ std::function<void(k_api::Base::ActionNotification)> KinovaRobot::check_for_end_
             break;
         default:
             break;
+        }
+    };
+}
+
+std::function<void(k_api::Base::ActionNotification)> KinovaRobot::create_event_listener_by_promise(std::promise<k_api::Base::ActionEvent>& finish_promise_cart)
+{
+    return [&finish_promise_cart] (k_api::Base::ActionNotification notification)
+    {
+        const auto action_event = notification.action_event();
+        switch(action_event)                            
+        {                                               
+            case k_api::Base::ActionEvent::ACTION_END:      
+            case k_api::Base::ActionEvent::ACTION_ABORT:    
+                finish_promise_cart.set_value(action_event);
+                break;
+            default:
+                break;
         }
     };
 }
