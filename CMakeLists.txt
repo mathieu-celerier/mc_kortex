@@ -14,7 +14,6 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 find_package(mc_rtc REQUIRED)
 find_package(Boost REQUIRED COMPONENTS program_options thread)
 
-set(KORTEX_DIR "${PROJECT_SOURCE_DIR}/extern/kortex_api")
 ### KORTEX RELATED
 if(UNIX)
   add_definitions(-D_OS_UNIX)
@@ -23,6 +22,30 @@ elseif(WIN32)
   if(MSVC)
      add_compile_options(/bigobj)
   endif()
+endif()
+set(KORTEX_DIR "${PROJECT_SOURCE_DIR}/extern/kortex_api")
+set(KORTEX_SUB_DIR "")
+
+if(UNIX)
+	execute_process(COMMAND ./download_kortex_api.sh ${KORTEX_SUB_DIR}
+	WORKING_DIRECTORY ../scripts
+ 	RESULT_VARIABLE DOWNLOAD_API_RESULT
+ 	OUTPUT_VARIABLE DOWNLOAD_API_OUTPUT)
+ 	if(NOT DOWNLOAD_API_RESULT EQUAL 0)
+ 		message("Kortex API was not downloaded prior to running CMake.")
+ 		message(FATAL_ERROR ${DOWNLOAD_API_OUTPUT})
+ 	endif()
+ 		link_libraries(${KORTEX_DIR}lib/${KORTEX_LIB_SUBDIR}/libKortexApiCpp.a)
+ 	elseif(WIN32)
+		execute_process(COMMAND ./download_kortex_api.bat ${KORTEX_SUB_DIR}
+ 		WORKING_DIRECTORY ../scripts
+ 		RESULT_VARIABLE DOWNLOAD_API_RESULT
+		OUTPUT_VARIABLE DOWNLOAD_API_OUTPUT)
+ 	if(NOT DOWNLOAD_API_RESULT EQUAL 0)
+ 		message("Kortex API was not downloaded prior to running CMake.")
+		message(FATAL_ERROR ${DOWNLOAD_API_OUTPUT})
+	endif()
+  	link_libraries(${KORTEX_DIR}lib/${KORTEX_LIB_SUBDIR}/KortexApiCpp.lib)
 endif()
 
 # Load kortex_api
