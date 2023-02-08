@@ -24,29 +24,6 @@ elseif(WIN32)
   endif()
 endif()
 set(KORTEX_DIR "${PROJECT_SOURCE_DIR}/extern/kortex_api")
-set(KORTEX_SUB_DIR "")
-
-if(UNIX)
-	execute_process(COMMAND ./download_kortex_api.sh ${KORTEX_SUB_DIR}
-	WORKING_DIRECTORY ../scripts
- 	RESULT_VARIABLE DOWNLOAD_API_RESULT
- 	OUTPUT_VARIABLE DOWNLOAD_API_OUTPUT)
- 	if(NOT DOWNLOAD_API_RESULT EQUAL 0)
- 		message("Kortex API was not downloaded prior to running CMake.")
- 		message(FATAL_ERROR ${DOWNLOAD_API_OUTPUT})
- 	endif()
- 		link_libraries(${KORTEX_DIR}lib/${KORTEX_LIB_SUBDIR}/libKortexApiCpp.a)
- 	elseif(WIN32)
-		execute_process(COMMAND ./download_kortex_api.bat ${KORTEX_SUB_DIR}
- 		WORKING_DIRECTORY ../scripts
- 		RESULT_VARIABLE DOWNLOAD_API_RESULT
-		OUTPUT_VARIABLE DOWNLOAD_API_OUTPUT)
- 	if(NOT DOWNLOAD_API_RESULT EQUAL 0)
- 		message("Kortex API was not downloaded prior to running CMake.")
-		message(FATAL_ERROR ${DOWNLOAD_API_OUTPUT})
-	endif()
-  	link_libraries(${KORTEX_DIR}lib/${KORTEX_LIB_SUBDIR}/KortexApiCpp.lib)
-endif()
 
 # Load kortex_api
 link_libraries(${KORTEX_DIR}/lib/release/libKortexApiCpp.a)
