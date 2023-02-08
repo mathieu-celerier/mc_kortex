@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 1.0)
 
-set(PROJECT_NAME mc_mujoco)
-set(PROJECT_DESCRIPTION "Mujoco interface for mc-rtc")
+set(PROJECT_NAME mc_kortex)
+set(PROJECT_DESCRIPTION "Kinova Kortex interface for mc-rtc")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
