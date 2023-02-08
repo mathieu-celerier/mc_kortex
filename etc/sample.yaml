@@ -1,4 +1,5 @@
 # Sample configuration for multi-robot connection
+Plugins: [ ExternalForcesEstimator ]
 Kortex:
   init_posture:
     on_startup: false
