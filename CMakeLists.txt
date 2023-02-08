@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 1.0)
+cmake_minimum_required(VERSION 3.0)
 
 set(PROJECT_NAME mc_kortex)
 set(PROJECT_DESCRIPTION "Kinova Kortex interface for mc-rtc")
