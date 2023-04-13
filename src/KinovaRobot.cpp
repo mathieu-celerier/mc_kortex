@@ -445,12 +445,12 @@ double KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot & robot, k_api::Base
         if (qdd_i_val > m_friction_accel_threshold)
         {
             m_friction_compensation_mode[joint_idx] = 1;
-            static_friction = m_friction_values[joint_idx]*((2/(1+exp(-10.5866096494 *vel)))-1);
+            static_friction = m_friction_values[joint_idx];
         }
         else if (qdd_i_val < -m_friction_accel_threshold)
         {
             m_friction_compensation_mode[joint_idx] = -1;
-            static_friction = m_friction_values[joint_idx]*((2/(1+exp(-10.5866096494*vel)))-1);
+            static_friction = -m_friction_values[joint_idx];
         }
     }
 
@@ -1082,7 +1082,6 @@ std::vector<double> KinovaRobot::computePostureTaskOffset(mc_rbdyn::Robot & robo
     
     // Posture task only in damping mode no need for offsets
     if(posture_task == nullptr) return offsets;
-    if(posture_task->stiffness() == 0) return offsets;
     if(posture_task->posture().size() == 0) return offsets;
 
     auto rjo = robot.refJointOrder();
