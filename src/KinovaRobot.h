@@ -24,6 +24,13 @@ namespace k_api = Kinova::Api;
 namespace mc_kinova
 {
 
+enum TorqueControlType
+{
+    Default,
+    Feedforward,
+    Custom
+};
+
 class KinovaRobot
 {
 private:
@@ -70,7 +77,7 @@ private:
     std::vector<double> m_filtered_velocities;
 
     // ===== Custom torque control properties =====
-    bool m_use_custom_torque_control;
+    TorqueControlType m_torque_control_type;
 
     std::vector<double> m_offsets;
 

@@ -21,7 +21,7 @@ m_name(name), m_ip_address(ip_address), m_port(10000), m_port_real_time(10001), 
     m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
     m_control_mode_id = 0;
     m_prev_control_mode_id = 0;
-    m_use_custom_torque_control = false;
+    m_torque_control_type = mc_kinova::TorqueControlType::Default;
 }
 
 KinovaRobot::~KinovaRobot()
@@ -92,7 +92,6 @@ void KinovaRobot::setSingleServoingMode()
 
 void KinovaRobot::setCustomTorque(mc_rtc::Configuration & torque_config)
 {
-    m_use_custom_torque_control = true;
     if(torque_config.has("friction_compensation"))
     {
         if(torque_config("friction_compensation").has("compensation_values"))
@@ -181,7 +180,7 @@ void KinovaRobot::setControlMode(std::string mode)
     }
     if(mode.compare("Torque") == 0)
     {
-        if (m_use_custom_torque_control)
+        if (m_torque_control_type != mc_kinova::TorqueControlType::Default)
         {
             if (m_control_mode == k_api::ActuatorConfig::ControlMode::CURRENT) return;
 
@@ -294,9 +293,21 @@ void KinovaRobot::init(mc_control::MCGlobalController & gc, mc_rtc::Configuratio
         if(!kortexConfig.has("mode")) mc_rtc::log::error_and_throw<std::runtime_error>("[mc_kortex] For {} robot, \"torque_control\" key found in config file but \"mode\" key is missing.",m_name);
         
         std::string controle_mode = kortexConfig("mode");
-        if (controle_mode.compare("custom") == 0)
+        if (controle_mode.compare("feedforward") == 0)
         {
+            m_torque_control_type = mc_kinova::TorqueControlType::Feedforward;
+            mc_rtc::log::info("[mc_kortex] Using feedforward only for torque control");
+        }
+        else if (controle_mode.compare("custom") == 0)
+        {
+            m_torque_control_type = mc_kinova::TorqueControlType::Custom;
             setCustomTorque(kortexConfig);
+            mc_rtc::log::info("[mc_kortex] Using custom control for torque control");
+        }
+        else
+        {
+            m_torque_control_type = mc_kinova::TorqueControlType::Default;
+            mc_rtc::log::info("[mc_kortex] Using Kinova's default control for torque control");
         }
     }
 
@@ -327,7 +338,7 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController & gc)
 {
     gc.controller().logger().addLogEntry("kortex_LoopPerf", [&, this]() {return m_dt;});
 
-    if(m_use_custom_torque_control)
+    if(m_torque_control_type == mc_kinova::TorqueControlType::Custom)
     {
         gc.controller().logger().addLogEntry("kortex_friction_velocity_threshold", [this]() {return m_friction_vel_threshold;});
         gc.controller().logger().addLogEntry("kortex_friction_acceleration_threshold", [this]() {return m_friction_accel_threshold;});
@@ -353,7 +364,7 @@ void KinovaRobot::removeLogEntry(mc_control::MCGlobalController & gc)
 {
     gc.controller().logger().removeLogEntry("kortexLoopPerf");
 
-    if(m_use_custom_torque_control)
+    if(m_torque_control_type == mc_kinova::TorqueControlType::Custom)
     {
         gc.controller().logger().removeLogEntry("kortex_friction_velocity_threshold");
         gc.controller().logger().removeLogEntry("kortex_friction_acceleration_threshold");
@@ -494,6 +505,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot & robot, bool & running)
 
     for(size_t i = 0; i < m_actuator_count; i++)
     {
+        double kt = (i > 3) ? 0.076 : 0.11;
         if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION)
         {
             m_base_command.mutable_actuators(i)->set_position(radToJointPose(i,m_command.q[robot.jointIndexByName(rjo[i])][0]));
@@ -515,13 +527,20 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot & robot, bool & running)
         //     m_base_command.mutable_actuators(i)->set_velocity(mc_rtc::constants::toDeg(m_command.alpha[robot.jointIndexByName(rjo[i])][0]));
         // }
 
-        if(m_use_custom_torque_control)
+        switch(m_torque_control_type)
         {
-            m_base_command.mutable_actuators(i)->set_current_motor(currentTorqueControlLaw(robot,m_state_local,m_jac.jacobian(robot.mb(),robot.mbc()),i));
-        }
-        else
-        {
-            m_base_command.mutable_actuators(i)->set_torque_joint(m_command.jointTorque[robot.jointIndexByName(rjo[i])][0]);
+            case mc_kinova::TorqueControlType::Default :
+                m_base_command.mutable_actuators(i)->set_torque_joint(m_command.jointTorque[robot.jointIndexByName(rjo[i])][0]);
+                break;
+            case mc_kinova::TorqueControlType::Feedforward :
+                m_base_command.mutable_actuators(i)->set_current_motor(m_command.jointTorque[robot.jointIndexByName(rjo[i])][0]/(GEAR_RATIO*kt));
+                break;
+            case mc_kinova::TorqueControlType::Custom :
+                m_base_command.mutable_actuators(i)->set_current_motor(currentTorqueControlLaw(robot,m_state_local,m_jac.jacobian(robot.mb(),robot.mbc()),i));
+                break;
+            default:
+                mc_rtc::log::error_and_throw<std::runtime_error>("[mc_kortex] wrong torque control type when trying to send command");
+                break;
         }
         // std::cout << m_base_command.mutable_actuators(i)->position() << " " << m_state_local.mutable_actuators(i)->position() << " | ";
     }
@@ -1014,7 +1033,7 @@ void KinovaRobot::addGui(mc_control::MCGlobalController & gc)
         )
     );
 
-    if(m_use_custom_torque_control)
+    if(m_torque_control_type == mc_kinova::TorqueControlType::Custom)
     {
         gc.controller().gui()->addElement({"Kortex",m_name},
             mc_rtc::gui::ArrayInput(

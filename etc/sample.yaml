@@ -7,7 +7,7 @@ Kortex:
   filter_velocity:
     ratio: 0.97
   torque_control:
-    mode: custom # If want to use modified control loop
+    mode: custom # If want to use modified control loop [default, feedforward, custom]
     friction_compensation:
       velocity_threshold: 0.034906585 # in rad
       acceleration_threshold: 0.5 # in rad, for cases where velocity is below threshold
