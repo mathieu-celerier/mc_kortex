@@ -1,12 +1,10 @@
 set(mc_kortex_lib_SRC
     mc_kortex.cpp
-    KinovaControlLoop.cpp
     KinovaRobot.cpp
 )
 
 set(mc_kortex_lib_HDR
     mc_kortex.h
-    KinovaControlLoop.h
     KinovaRobot.h
 )
 

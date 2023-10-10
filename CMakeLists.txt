@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.5)
 
 set(PROJECT_NAME mc_kortex)
 set(PROJECT_DESCRIPTION "Kinova Kortex interface for mc-rtc")
@@ -18,6 +18,7 @@ find_package(Boost REQUIRED COMPONENTS program_options thread)
 
 # Download kortex_api if needed
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+  add_definitions(-D_OS_UNIX)
   set(KORTEX_API_URL "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86-64_x86_gcc.zip")
   file(DOWNLOAD "${KORTEX_API_URL}" "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
   file(ARCHIVE_EXTRACT
