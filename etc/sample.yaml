@@ -1,5 +1,6 @@
 # Sample configuration for multi-robot connection
 Plugins: [ ExternalForcesEstimator ]
+
 Kortex:
   init_posture:
     on_startup: false
@@ -7,6 +8,7 @@ Kortex:
   filter_velocity:
     ratio: 0.97
   torque_control:
+    # Parameters used in custom mode (DEPRECATED for now)
     mode: custom # If want to use modified control loop [default, feedforward, custom]
     friction_compensation:
       velocity_threshold: 0.034906585 # in rad
@@ -15,6 +17,25 @@ Kortex:
     integral_term:
       mu: 0.9
       gains: [10.0, 10.0, 10.0, 10.0, 300.0, 400.0, 800.0]
+
+    # Parameters used in Kalman mode
+    mode: kalman
+    init:
+      pTerm: 1.0
+      biasTerm: 0.0
+    limit:
+      pTerm:
+        min: 0.8
+        max: 1.2
+      biasTerm:
+        min: -1.0
+        max: 1.0
+    covar:
+      initPTerm: 2.5e-9
+      initBiasTerm: 2.5e-7
+      pTerm: 2.5e-9
+      biasTerm: 2.5e-7
+      sensTerm: 2.5e-7
 
   kinova: # Name of the robot in the controller
     ip: 192.168.1.10
