@@ -95,12 +95,12 @@ void KinovaRobot::initKalmanFromConfig(mc_rtc::Configuration &config) {
   }
   if (config.has("limit")) {
     if (config("limit").has("pTerm")) {
-      config("init")("pTerm")("max", limitPTermMax);
-      config("init")("pTerm")("min", limitPTermMin);
+      config("limit")("pTerm")("max", limitPTermMax);
+      config("limit")("pTerm")("min", limitPTermMin);
     }
     if (config("limit").has("biasTerm")) {
-      config("init")("biasTerm")("max", limitBiasTermMax);
-      config("init")("biasTerm")("min", limitBiasTermMin);
+      config("limit")("biasTerm")("max", limitBiasTermMax);
+      config("limit")("biasTerm")("min", limitBiasTermMin);
     }
   }
   if (config.has("covar")) {
@@ -136,23 +136,32 @@ void KinovaRobot::initKalmanFromConfig(mc_rtc::Configuration &config) {
 
 void KinovaRobot::setCustomTorque(mc_rtc::Configuration &torque_config) {
   if (torque_config.has("friction_compensation")) {
-    if (torque_config("friction_compensation").has("compensation_values")) {
-      m_friction_values =
-          torque_config("friction_compensation")("compensation_values");
-      if (!m_friction_values.size() == m_actuator_count)
+    if (torque_config("friction_compensation").has("coulomb")) {
+      m_friction_values = torque_config("friction_compensation")("coulomb");
+      if (not(m_friction_values.size() == m_actuator_count))
         mc_rtc::log::error_and_throw<std::runtime_error>(
             "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
             "does not match actuators count.\nActuators count = ",
             m_name, m_actuator_count);
     } else {
-      m_friction_values = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
+      m_friction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
+    }
+    if (torque_config("friction_compensation").has("viscous")) {
+      m_viscous_values = torque_config("friction_compensation")("viscous");
+      if (not(m_viscous_values.size() == m_actuator_count))
+        mc_rtc::log::error_and_throw<std::runtime_error>(
+            "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
+            "does not match actuators count.\nActuators count = ",
+            m_name, m_actuator_count);
+    } else {
+      m_viscous_values = {2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1};
     }
 
     if (torque_config("friction_compensation").has("velocity_threshold")) {
       m_friction_vel_threshold =
           torque_config("friction_compensation")("velocity_threshold");
     } else {
-      m_friction_vel_threshold = 0.1;
+      m_friction_vel_threshold = 0.01;
     }
 
     if (torque_config("friction_compensation").has("acceleration_threshold")) {
@@ -161,32 +170,41 @@ void KinovaRobot::setCustomTorque(mc_rtc::Configuration &torque_config) {
     } else {
       m_friction_accel_threshold = 100;
     }
-  } else {
-    m_friction_values = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
-  }
 
-  if (torque_config.has("integral_term")) {
-    if (torque_config("integral_term").has("mu")) {
-      m_mu = torque_config("integral_term")("mu");
+    if (torque_config.has("lambda")) {
+      m_lambda = torque_config("lambda");
     } else {
-      m_mu = 0.9;
-    }
-
-    if (torque_config("integral_term").has("gains")) {
-      m_integral_gains = torque_config("integral_term")("gains");
-      if (!m_friction_values.size() == m_actuator_count)
-        mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[mc_kortex] for {} robot, value for \"gains\" key does not match "
-            "actuators count.\nActuators count = ",
-            m_name, m_actuator_count);
-
-    } else {
-      m_integral_gains = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
+      m_lambda = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
     }
   } else {
-    m_mu = 0.9;
-    m_integral_gains = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
+    m_friction_vel_threshold = 0.01;
+    m_friction_accel_threshold = 100;
+    m_friction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
+    m_viscous_values = {2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1};
   }
+
+  // if (torque_config.has("integral_term")) {
+  //   if (torque_config("integral_term").has("mu")) {
+  //     m_mu = torque_config("integral_term")("mu");
+  //   } else {
+  //     m_mu = 0.9;
+  //   }
+  //
+  //   if (torque_config("integral_term").has("gains")) {
+  //     m_integral_gains = torque_config("integral_term")("gains");
+  //     if (!m_friction_values.size() == m_actuator_count)
+  //       mc_rtc::log::error_and_throw<std::runtime_error>(
+  //           "[mc_kortex] for {} robot, value for \"gains\" key does not match
+  //           " "actuators count.\nActuators count = ", m_name,
+  //           m_actuator_count);
+  //
+  //   } else {
+  //     m_integral_gains = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
+  //   }
+  // } else {
+  //   m_mu = 0.9;
+  //   m_integral_gains = {2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8};
+  // }
 
   mc_rtc::log::info(
       "[mc_kortex] {} robot is using custom torque control with parameters:",
@@ -213,16 +231,9 @@ void KinovaRobot::setControlMode(std::string mode) {
     return;
   }
   if (mode.compare("Torque") == 0) {
-    if (m_torque_control_type != mc_kinova::TorqueControlType::Default) {
-      if (m_control_mode == k_api::ActuatorConfig::ControlMode::CURRENT)
-        return;
-
-      // mc_rtc::log::info("[mc_kortex] Using torque control");
-      initFiltersBuffers();
-      m_control_mode = k_api::ActuatorConfig::ControlMode::CURRENT;
-      m_control_mode_id++;
-      return;
-    } else {
+    switch (m_torque_control_type) {
+    case mc_kinova::TorqueControlType::Default:
+    case mc_kinova::TorqueControlType::Kalman:
       if (m_control_mode ==
           k_api::ActuatorConfig::ControlMode::TORQUE_HIGH_VELOCITY)
         return;
@@ -231,6 +242,18 @@ void KinovaRobot::setControlMode(std::string mode) {
       m_control_mode = k_api::ActuatorConfig::ControlMode::TORQUE_HIGH_VELOCITY;
       m_control_mode_id++;
       return;
+      break;
+    case mc_kinova::TorqueControlType::Feedforward:
+    case mc_kinova::TorqueControlType::Custom:
+      if (m_control_mode == k_api::ActuatorConfig::ControlMode::CURRENT)
+        return;
+
+      // mc_rtc::log::info("[mc_kortex] Using torque control");
+      initFiltersBuffers();
+      m_control_mode = k_api::ActuatorConfig::ControlMode::CURRENT;
+      m_control_mode_id++;
+      return;
+      break;
     }
   }
 }
@@ -282,6 +305,8 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_filter_command.assign(m_actuator_count, 0.0);
   m_current_command.setZero(m_actuator_count);
   m_current_measurement.setZero(m_actuator_count);
+  m_torque_from_current_measurement.setZero(m_actuator_count);
+  m_tau_sensor.setZero(m_actuator_count);
   m_torque_error_sum.assign(m_actuator_count, 0.0);
   m_torque_error.assign(m_actuator_count, 0.0);
   m_integral_fast_filter.assign(m_actuator_count, 0.0);
@@ -292,6 +317,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_offsets.assign(m_actuator_count, 0.0);
   initFilt.assign(m_actuator_count, true);
   tau_r.setZero(m_actuator_count);
+  m_lambda.assign(m_actuator_count, 0.0);
 
   // Set control mode
   auto controle_mode = k_api::ActuatorConfig::ControlModeInformation();
@@ -303,7 +329,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   if (kortexConfig.has("init_posture")) {
     if (kortexConfig("init_posture").has("posture")) {
       m_init_posture = kortexConfig("init_posture")("posture");
-      if (!m_init_posture.size() == m_actuator_count)
+      if (not(m_init_posture.size() == m_actuator_count))
         mc_rtc::log::error_and_throw<std::runtime_error>(
             "[MC_KORTEX] for {} robot, value for \"posture\" key does not "
             "match actuators count.\nActuators count = ",
@@ -395,6 +421,18 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
                                          [this]() { return tau_r; });
     gc.controller().logger().addLogEntry("kortex_kalman_tau_r_theo",
                                          [this]() { return tau_r_theo; });
+    gc.controller().logger().addLogEntry(
+        "kortex_torque_from_current",
+        [this]() { return m_torque_from_current_measurement; });
+    gc.controller().logger().addLogEntry("kortex_torque_error",
+                                         [this]() { return m_torque_error; });
+  }
+  if (m_torque_control_type == mc_kinova::TorqueControlType::Feedforward) {
+    gc.controller().logger().addLogEntry(
+        "kortex_commanded_current", [this]() { return m_current_command; });
+    gc.controller().logger().addLogEntry(
+        "kortex_current_measurement",
+        [this]() { return m_torque_from_current_measurement; });
   }
 
   if (m_torque_control_type == mc_kinova::TorqueControlType::Custom) {
@@ -405,8 +443,10 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
         "kortex_friction_acceleration_threshold",
         [this]() { return m_friction_accel_threshold; });
     gc.controller().logger().addLogEntry(
-        "kortex_friction_compensation_values",
+        "kortex_friction_coulomb_values",
         [this]() { return m_friction_values; });
+    gc.controller().logger().addLogEntry("kortex_friction_viscous_values",
+                                         [this]() { return m_viscous_values; });
     gc.controller().logger().addLogEntry("kortex_friction_mode", [this]() {
       return m_friction_compensation_mode;
     });
@@ -439,6 +479,8 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
         "kortex_jac_transpose_F", [this]() { return m_jac_transpose_f; });
     gc.controller().logger().addLogEntry("kortex_posture_task_offset",
                                          [this]() { return m_offsets; });
+    gc.controller().logger().addLogEntry("kortex_lambda",
+                                         [this]() { return m_lambda; });
   }
 }
 
@@ -508,8 +550,8 @@ double KinovaRobot::computeTorqueWKalman(
   filter->pushMeasurement(measure);
   if (initFilt[idx]) {
     mc_rtc::log::info("Init en cour");
-    // tau_r(idx) = (torque - initBiasTerm) / initPTerm;
-    tau_r(idx) = torque;
+    tau_r_theo(idx) = (torque - initBiasTerm) / initPTerm;
+    tau_r(idx) = tau_r_theo(idx);
     mc_rtc::log::info("Init tau_r set");
     filter->setC(Eigen::Vector2d(tau_r(idx), 1.0).transpose());
     mc_rtc::log::info("Init C set");
@@ -527,10 +569,12 @@ double KinovaRobot::computeTorqueWKalman(
   }
   filtAlpha(idx) = state(0);
   filtBeta(idx) = state(1);
+  filter->setCurrentState(state);
   // tau_r(idx) = (torque - state(1)) / state(0);
   tau_r_theo(idx) = (torque - state(1)) / state(0);
-  tau_r(idx) = torque;
-  filter->setC(Eigen::Vector2d(tau_r_theo(idx), 1.0).transpose());
+  tau_r(idx) = tau_r_theo(idx);
+  filter->setC(Eigen::Vector2d(tau_r(idx), 1.0).transpose());
+  m_torque_error[idx] = tau_r(idx) - measure(0);
 
   return tau_r(idx);
 }
@@ -554,17 +598,6 @@ double KinovaRobot::currentTorqueControlLaw(
   double tau_error = tau_d + tau_m;
   m_torque_error[joint_idx] = tau_error;
 
-  // auto fx = m_state.base().tool_external_wrench_force_x();
-  // auto fy = m_state.base().tool_external_wrench_force_y();
-  // auto fz = m_state.base().tool_external_wrench_force_z();
-  // auto cx = m_state.base().tool_external_wrench_torque_x();
-  // auto cy = m_state.base().tool_external_wrench_torque_y();
-  // auto cz = m_state.base().tool_external_wrench_torque_z();
-  // auto qdd_external_force =
-  // jacobian.transpose()*sva::ForceVecd(Eigen::Vector3d(cx,cy,cz),Eigen::Vector3d(fx,fy,fz)).vector();
-
-  // auto qdd_i_val = qdd_external_force[joint_idx] +
-  // m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
   auto qdd_i_val = m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
   // m_jac_transpose_f[joint_idx] = qdd_external_force[joint_idx];
 
@@ -584,22 +617,18 @@ double KinovaRobot::currentTorqueControlLaw(
     }
   }
 
-  // m_filter_command[joint_idx] = 1.971946 * y[0] - 0.9721211 * y[1] +
-  //                               0.04744607 * tau_error - 0.008317108 * x[0] +
-  //                               0.003642568 * x[1];
-  m_filter_command[joint_idx] = 2.864001 * y[0] - 2.730119 * y[1] +
-                                0.8661156 * y[2] + 0.01993631 * tau_error -
-                                0.01862187 * x[0] - 0.01993022 * x[1] +
-                                0.01862796 * x[2];
-  double saturated_filter_command =
-      max(min(m_filter_command[joint_idx] * 0.1, 4.0), -4.0);
+  m_filter_command[joint_idx] = 1.975063 * y[0] - 0.9751799 * y[1] +
+                                0.02017482 * tau_error - 0.03697504 * x[0] +
+                                0.01691718 * x[1];
 
   m_filter_input_buffer[joint_idx].push_front(tau_error);
   m_filter_output_buffer[joint_idx].push_front(m_filter_command[joint_idx]);
 
   // double current = (tau_d + static_friction +
   // m_torque_error_sum[joint_idx])/(GEAR_RATIO*kt);
-  double current = saturated_filter_command + (tau_d) / (GEAR_RATIO * kt);
+  double current = (m_lambda[joint_idx] * m_filter_command[joint_idx] + tau_d +
+                    static_friction) /
+                   (GEAR_RATIO * kt);
   m_current_command[joint_idx] = current;
   return current;
 }
@@ -638,18 +667,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
     } else {
       m_base_command.mutable_actuators(i)->set_position(
           m_state_local.mutable_actuators(i)->position());
-      // m_base_command.mutable_actuators(i)->set_position(radToJointPose(i,m_command.q[robot.jointIndexByName(rjo[i])][0]));
     }
-
-    // if (m_control_mode == k_api::ActuatorConfig::ControlMode::VELOCITY)
-    // {
-    //     m_base_command.mutable_actuators(i)->set_velocity(mc_rtc::constants::toDeg(m_command.alpha[robot.jointIndexByName(rjo[i])][0]));
-    //     continue;
-    // }
-    // else
-    // {
-    //     m_base_command.mutable_actuators(i)->set_velocity(mc_rtc::constants::toDeg(m_command.alpha[robot.jointIndexByName(rjo[i])][0]));
-    // }
 
     switch (m_torque_control_type) {
     case mc_kinova::TorqueControlType::Default:
@@ -666,6 +684,9 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
       m_base_command.mutable_actuators(i)->set_current_motor(
           m_command.jointTorque[robot.jointIndexByName(rjo[i])][0] /
           (GEAR_RATIO * kt));
+      m_current_command(i) =
+          m_command.jointTorque[robot.jointIndexByName(rjo[i])][0] /
+          (GEAR_RATIO * kt);
       break;
     case mc_kinova::TorqueControlType::Custom:
       m_base_command.mutable_actuators(i)->set_current_motor(
@@ -737,10 +758,11 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
   std::vector<double> tau(m_actuator_count);
   std::map<std::string, sva::ForceVecd> wrenches;
   double fx, fy, fz, cx, cy, cz;
-  // std::map<std::string,double> current;
+  std::map<std::string, double> current;
   // std::map<std::string,double> temp;
 
   for (size_t i = 0; i < m_actuator_count; i++) {
+    double kt = (i > 3) ? 0.076 : 0.11;
     q[i] = jointPoseToRad(i, m_state.mutable_actuators(i)->position()) +
            m_offsets[i];
     if (m_use_filtered_velocities) {
@@ -755,7 +777,11 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
           mc_rtc::constants::toRad(m_state.mutable_actuators(i)->velocity());
     }
     tau[i] = -m_state.mutable_actuators(i)->torque();
-    m_current_measurement[i] = m_state.mutable_actuators(i)->current_motor();
+    m_tau_sensor(i) = tau[i];
+    m_current_measurement(i) = m_state.mutable_actuators(i)->current_motor();
+    m_torque_from_current_measurement(i) =
+        m_state.mutable_actuators(i)->current_motor();
+    current[rjo[i]] = m_current_measurement(i);
     // temp[rjo[joint_idx]] = actuator.temperature_motor();
   }
 
@@ -772,7 +798,7 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
   gc.setEncoderVelocities(m_name, qdot);
   gc.setJointTorques(m_name, tau);
   gc.setWrenches(wrenches);
-  // gc.setJointMotorCurrents(m_name,current);
+  gc.setJointMotorCurrents(m_name, current);
   // gc.setJointMotorTemperatures(m_name,temp);
 }
 
@@ -1224,10 +1250,13 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
             [this]() { return m_integral_gains; },
             [this](const std::vector<double> &v) { m_integral_gains = v; }),
         mc_rtc::gui::ArrayInput(
-            "Friction compensation values",
-            gc.controller().robot().refJointOrder(),
+            "Friction coulomb values", gc.controller().robot().refJointOrder(),
             [this]() { return m_friction_values; },
             [this](const std::vector<double> &v) { m_friction_values = v; }),
+        mc_rtc::gui::ArrayInput(
+            "Friction viscous values", gc.controller().robot().refJointOrder(),
+            [this]() { return m_viscous_values; },
+            [this](const std::vector<double> &v) { m_viscous_values = v; }),
         mc_rtc::gui::NumberInput(
             "Friction compensation velocity threshold",
             [this]() { return m_friction_vel_threshold; },
@@ -1236,9 +1265,30 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
             "Friction compensation acceleration threshold",
             [this]() { return m_friction_accel_threshold; },
             [this](const double v) { m_friction_accel_threshold = v; }),
-        mc_rtc::gui::NumberSlider(
-            "Integral term blending, mu value:", [this]() { return m_mu; },
-            [this](const double v) { m_mu = v; }, 0.001, 0.999));
+        mc_rtc::gui::ArrayInput(
+            "Lambda", gc.controller().robot().refJointOrder(),
+            [this]() { return m_lambda; },
+            [this](const std::vector<double> &v) { m_lambda = v; }));
+  }
+
+  if (m_torque_control_type == mc_kinova::TorqueControlType::Kalman) {
+    gc.controller().gui()->addElement(
+        {"Kortex", m_name},
+        mc_rtc::gui::ArrayInput(
+            "Alpha", gc.controller().robot().refJointOrder(), filtAlpha),
+        mc_rtc::gui::ArrayInput("Beta", gc.controller().robot().refJointOrder(),
+                                filtBeta),
+        mc_rtc::gui::ArrayInput("Torque",
+                                gc.controller().robot().refJointOrder(), tau_r),
+        mc_rtc::gui::ArrayInput("Tau from current measurement",
+                                gc.controller().robot().refJointOrder(),
+                                m_torque_from_current_measurement),
+        mc_rtc::gui::ArrayInput("Tau sensor",
+                                gc.controller().robot().refJointOrder(),
+                                m_tau_sensor),
+        mc_rtc::gui::ArrayInput("Tau error",
+                                gc.controller().robot().refJointOrder(),
+                                m_torque_error));
   }
 
   if (m_use_filtered_velocities) {

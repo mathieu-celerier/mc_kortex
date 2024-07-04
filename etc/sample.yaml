@@ -10,6 +10,7 @@ Kortex:
   torque_control:
     # Parameters used in custom mode (DEPRECATED for now)
     mode: custom # If want to use modified control loop [default, feedforward, custom]
+    lambda: [7.0,7.0,7.0,7.0,7.0,7.0,7.0]
     friction_compensation:
       velocity_threshold: 0.034906585 # in rad
       acceleration_threshold: 0.5 # in rad, for cases where velocity is below threshold

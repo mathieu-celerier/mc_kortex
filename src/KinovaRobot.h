@@ -80,6 +80,7 @@ private:
   double m_friction_vel_threshold;
   double m_friction_accel_threshold;
   std::vector<double> m_friction_values;
+  std::vector<double> m_viscous_values;
   std::vector<double> m_friction_compensation_mode;
 
   std::vector<double> m_torque_error;
@@ -95,6 +96,7 @@ private:
   std::vector<boost::circular_buffer<double>> m_filter_input_buffer;
   std::vector<boost::circular_buffer<double>> m_filter_output_buffer;
   std::vector<double> m_filter_command;
+  std::vector<double> m_lambda;
 
   std::vector<stateObservation::LinearKalmanFilter *> vecKalmanFilt_;
   double initPTerm = 1.0;
@@ -119,6 +121,8 @@ private:
 
   Eigen::VectorXd m_current_command;
   Eigen::VectorXd m_current_measurement;
+  Eigen::VectorXd m_torque_from_current_measurement;
+  Eigen::VectorXd m_tau_sensor;
 
 public:
   KinovaRobot(const std::string &name, const std::string &ip_address,
