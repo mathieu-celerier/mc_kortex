@@ -82,6 +82,7 @@ private:
   std::vector<double> m_friction_values;
   std::vector<double> m_viscous_values;
   std::vector<double> m_friction_compensation_mode;
+  std::vector<double> m_current_friction_compensation;
 
   std::vector<double> m_torque_error;
 

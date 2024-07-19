@@ -313,6 +313,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_integral_slow_filter.assign(m_actuator_count, 0.0);
   m_integral_term_command.assign(m_actuator_count, 0.0);
   m_friction_compensation_mode.assign(m_actuator_count, 0.0);
+  m_current_friction_compensation.assign(m_actuator_count, 0.0);
   m_jac_transpose_f.assign(m_actuator_count, 0.0);
   m_offsets.assign(m_actuator_count, 0.0);
   initFilt.assign(m_actuator_count, true);
@@ -450,6 +451,9 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
     gc.controller().logger().addLogEntry("kortex_friction_mode", [this]() {
       return m_friction_compensation_mode;
     });
+    gc.controller().logger().addLogEntry(
+        "kortex_friction_current_compensation",
+        [this]() { return m_current_friction_compensation; });
 
     gc.controller().logger().addLogEntry("kortex_torque_error",
                                          [this]() { return m_torque_error; });
@@ -603,10 +607,12 @@ double KinovaRobot::currentTorqueControlLaw(
 
   if (vel > m_friction_vel_threshold) {
     m_friction_compensation_mode[joint_idx] = 2;
-    static_friction = m_friction_values[joint_idx];
+    static_friction =
+        m_friction_values[joint_idx] + m_viscous_values[joint_idx] * vel;
   } else if (vel < -m_friction_vel_threshold) {
     m_friction_compensation_mode[joint_idx] = -2;
-    static_friction = -m_friction_values[joint_idx];
+    static_friction =
+        -m_friction_values[joint_idx] + m_viscous_values[joint_idx] * vel;
   } else {
     if (qdd_i_val > m_friction_accel_threshold) {
       m_friction_compensation_mode[joint_idx] = 1;
@@ -616,6 +622,7 @@ double KinovaRobot::currentTorqueControlLaw(
       static_friction = -m_friction_values[joint_idx];
     }
   }
+  m_current_friction_compensation[joint_idx] = static_friction;
 
   m_filter_command[joint_idx] = 1.975063 * y[0] - 0.9751799 * y[1] +
                                 0.02017482 * tau_error - 0.03697504 * x[0] +
@@ -781,7 +788,7 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
     m_current_measurement(i) = m_state.mutable_actuators(i)->current_motor();
     m_torque_from_current_measurement(i) =
         m_state.mutable_actuators(i)->current_motor();
-    current[rjo[i]] = m_current_measurement(i);
+    current[fmt::format("joint_{}", i + 1)] = m_current_measurement(i);
     // temp[rjo[joint_idx]] = actuator.temperature_motor();
   }
 
