@@ -670,6 +670,8 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
     if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION) {
       m_base_command.mutable_actuators(i)->set_position(
           radToJointPose(i, m_command.q[robot.jointIndexByName(rjo[i])][0]));
+      m_base_command.mutable_actuators(i)->set_current_motor(
+          m_state_local.mutable_actuators(i)->current_motor());
       continue;
     } else {
       m_base_command.mutable_actuators(i)->set_position(
