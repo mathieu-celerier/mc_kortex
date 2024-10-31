@@ -140,6 +140,7 @@ public:
   void initKalmanFromConfig(mc_rtc::Configuration &config);
   void setCustomTorque(mc_rtc::Configuration &torque_config);
   void setControlMode(std::string mode);
+  void setTorqueMode(std::string mode);
 
   void init(mc_control::MCGlobalController &gc,
             mc_rtc::Configuration

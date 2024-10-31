@@ -112,6 +112,7 @@ void run(void* data)
             // mc_rtc::log::info("[mc_kortex] Control loop elapsed time {}ms", (now-last)*1e-3);
             for (auto & kinova : kinovas)
             {
+                if (controller.controller().datastore().has("TorqueMode")) kinova->setTorqueMode(controller.controller().datastore().get<std::string>("TorqueMode"));
                 if (controller.controller().datastore().has("ControlMode")) kinova->setControlMode(controller.controller().datastore().get<std::string>("ControlMode"));
                 kinova->updateSensors(controller);
             }

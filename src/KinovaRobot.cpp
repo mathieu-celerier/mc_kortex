@@ -258,6 +258,20 @@ void KinovaRobot::setControlMode(std::string mode) {
   }
 }
 
+void KinovaRobot::setTorqueMode(std::string mode){
+  if (mode.compare("Default") == 0){
+    m_torque_control_type = mc_kinova::TorqueControlType::Default;
+  } else if (mode.compare("Feedforward") == 0){
+    m_torque_control_type = mc_kinova::TorqueControlType::Feedforward;
+  } else if (mode.compare("Kalman") == 0){
+    m_torque_control_type = mc_kinova::TorqueControlType::Kalman;
+  } else if (mode.compare("Custom") == 0){
+    m_torque_control_type = mc_kinova::TorqueControlType::Custom;
+  } else {
+    mc_rtc::log::error("[mc_kortex] Unknown torque control type: {}", mode);
+  }
+}
+
 // ==================== Public functions ==================== //
 
 void KinovaRobot::init(mc_control::MCGlobalController &gc,

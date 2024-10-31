@@ -18,13 +18,13 @@ find_package(Boost REQUIRED COMPONENTS program_options thread)
 
 # Download kortex_api if needed
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
-  add_definitions(-D_OS_UNIX)
-  set(KORTEX_API_URL "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86-64_x86_gcc.zip")
-  file(DOWNLOAD "${KORTEX_API_URL}" "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
-  file(ARCHIVE_EXTRACT
-        INPUT "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip"
-        DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}"
-  )
+  # add_definitions(-D_OS_UNIX)
+  # set(KORTEX_API_URL "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86-64_x86_gcc.zip")
+  # file(DOWNLOAD "${KORTEX_API_URL}" "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
+  # file(ARCHIVE_EXTRACT
+  #       INPUT "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip"
+  #       DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}"
+  # )
   set(KORTEX_ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
 else()
   if(NOT DEFINED KORTEX_ROOT_DIR)
