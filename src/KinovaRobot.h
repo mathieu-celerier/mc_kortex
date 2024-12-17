@@ -145,6 +145,7 @@ public:
   void init(mc_control::MCGlobalController &gc,
             mc_rtc::Configuration
                 &kortexConfig); // Initialize connection to the robot
+  void createDatastoreEntries(mc_control::MCGlobalController &gc);
   void addLogEntry(mc_control::MCGlobalController &gc);
   void removeLogEntry(mc_control::MCGlobalController &gc);
 

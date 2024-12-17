@@ -258,14 +258,14 @@ void KinovaRobot::setControlMode(std::string mode) {
   }
 }
 
-void KinovaRobot::setTorqueMode(std::string mode){
-  if (mode.compare("Default") == 0){
+void KinovaRobot::setTorqueMode(std::string mode) {
+  if (mode.compare("Default") == 0) {
     m_torque_control_type = mc_kinova::TorqueControlType::Default;
-  } else if (mode.compare("Feedforward") == 0){
+  } else if (mode.compare("Feedforward") == 0) {
     m_torque_control_type = mc_kinova::TorqueControlType::Feedforward;
-  } else if (mode.compare("Kalman") == 0){
+  } else if (mode.compare("Kalman") == 0) {
     m_torque_control_type = mc_kinova::TorqueControlType::Kalman;
-  } else if (mode.compare("Custom") == 0){
+  } else if (mode.compare("Custom") == 0) {
     m_torque_control_type = mc_kinova::TorqueControlType::Custom;
   } else {
     mc_rtc::log::error("[mc_kortex] Unknown torque control type: {}", mode);
@@ -418,9 +418,25 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
         m_state.actuators(i).position());
 
   addGui(gc);
+  createDatastoreEntries(gc);
 
   mc_rtc::log::success("[mc_kortex] Connected succesfuly to robot at {}:{}",
                        m_ip_address, m_port);
+}
+
+void KinovaRobot::createDatastoreEntries(mc_control::MCGlobalController &gc) {
+  gc.controller().datastore().make_call("mc_kortex::setLambda",
+                                        [this](std::vector<double> l) {
+                                          if (l.size() != 7)
+                                            return;
+                                          m_lambda = l;
+                                        });
+  gc.controller().datastore().make_call(
+      "mc_kortex::setVelThreshold",
+      [this](double th) { m_friction_vel_threshold = abs(th); });
+  gc.controller().datastore().make_call(
+      "mc_kortex::setAccThreshold",
+      [this](double th) { m_friction_accel_threshold = abs(th); });
 }
 
 void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
