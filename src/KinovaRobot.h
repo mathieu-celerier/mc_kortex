@@ -3,7 +3,6 @@
 #include <mc_rtc/logging.h>
 
 #include <boost/circular_buffer.hpp>
-#include <chrono>
 
 #include <ActuatorConfigClientRpc.h>
 #include <BaseClientRpc.h>
@@ -49,7 +48,11 @@ private:
   std::string m_name;
   int m_actuator_count;
 
+  bool stop_controller;
+
   int64_t m_dt;
+
+  double t_plot;
 
   int m_control_id;
   int m_prev_control_id;
@@ -84,19 +87,24 @@ private:
   std::vector<double> m_friction_compensation_mode;
   std::vector<double> m_current_friction_compensation;
 
+  std::vector<double> m_prev_torque_error;
   std::vector<double> m_torque_error;
 
-  std::vector<double> m_integral_gains;
-  std::vector<double> m_torque_error_sum;
-  std::vector<double> m_integral_fast_filter;
   std::vector<double> m_integral_slow_filter;
-  std::vector<double> m_integral_term_command;
+  std::vector<double> m_integral_slow_filter_w_gain;
+  double m_integral_slow_theta;
+  double m_integral_slow_gain;
+  std::vector<double> m_integral_slow_bound;
+
+  std::vector<double> m_torque_measure_corrected;
+
   std::vector<double> m_jac_transpose_f;
   rbd::Jacobian m_jac;
 
   std::vector<boost::circular_buffer<double>> m_filter_input_buffer;
   std::vector<boost::circular_buffer<double>> m_filter_output_buffer;
   std::vector<double> m_filter_command;
+  std::vector<double> m_filter_command_w_gain;
   std::vector<double> m_lambda;
 
   std::vector<stateObservation::LinearKalmanFilter *> vecKalmanFilt_;
@@ -169,6 +177,7 @@ public:
   void controlThread(mc_control::MCGlobalController &controller,
                      std::mutex &startM, std::condition_variable &startCV,
                      bool &start, bool &running);
+  void stopController();
   void moveToHomePosition(void);
   void moveToInitPosition(void);
 
@@ -186,6 +195,9 @@ private:
 
   void addGui(mc_control::MCGlobalController &gc);
   void removeGui(mc_control::MCGlobalController &gc);
+
+  void addPlot(mc_control::MCGlobalController &gc);
+  void removePlot(mc_control::MCGlobalController &gc);
 
   double jointPoseToRad(int joint_idx, double deg);
   double radToJointPose(int joint_idx, double rad);
