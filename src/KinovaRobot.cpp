@@ -1385,10 +1385,9 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
 
     gc.controller().gui()->addElement(
         {"Kortex", m_name, "Transfer function"},
-        mc_rtc::gui::ArrayInput(
-            "Lambda", gc.controller().robot().refJointOrder(),
-            [this]() { return m_lambda; },
-            [this](const std::vector<double> &v) { m_lambda = v; }));
+        mc_rtc::gui::NumberInput(
+            "Lambda", [this]() { return m_lambda[0]; },
+            [this](const double v) { m_lambda.assign(v, m_actuator_count); }));
 
     gc.controller().gui()->addElement(
         {"Kortex", m_name, "Integral term"},
