@@ -128,6 +128,8 @@ private:
   Eigen::VectorXd tau_r_theo;
   std::vector<bool> initFilt;
 
+  Eigen::VectorXd tau_fric;
+
   Eigen::VectorXd m_current_command;
   Eigen::VectorXd m_current_measurement;
   Eigen::VectorXd m_torque_from_current_measurement;
@@ -162,6 +164,10 @@ public:
   bool sendCommand(mc_rbdyn::Robot &robot, bool &running);
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
+
+  void torqueFrictionComputation(mc_rbdyn::Robot &robot,
+                                 k_api::BaseCyclic::Feedback m_state_local,
+                                 Eigen::MatrixXd jacobian, double joint_idx);
 
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                  k_api::BaseCyclic::Feedback m_state_local,

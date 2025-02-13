@@ -1,4 +1,6 @@
 #include "KinovaRobot.h"
+#include <Eigen/src/Core/Matrix.h>
+#include <mc_rtc/DataStore.h>
 
 namespace mc_kinova {
 
@@ -329,6 +331,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_offsets.assign(m_actuator_count, 0.0);
   initFilt.assign(m_actuator_count, true);
   tau_r.setZero(m_actuator_count);
+  tau_fric.setZero(m_actuator_count);
   m_lambda.assign(m_actuator_count, 0.0);
   m_integral_slow_theta = 1.0;
   m_integral_slow_gain = 1e-2;
@@ -470,6 +473,9 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
     gc.controller().logger().addLogEntry("kortex_friction_mode", [this]() {
       return m_friction_compensation_mode;
     });
+    gc.controller().logger().addLogEntry("torque friction", [this]() {
+      return tau_fric;
+    });
     gc.controller().logger().addLogEntry(
         "kortex_friction_current_compensation",
         [this]() { return m_current_friction_compensation; });
@@ -601,6 +607,34 @@ double KinovaRobot::computeTorqueWKalman(
   return tau_r(idx);
 }
 
+void KinovaRobot::torqueFrictionComputation(mc_rbdyn::Robot &robot,
+                                 k_api::BaseCyclic::Feedback m_state_local,
+                                 Eigen::MatrixXd jacobian, double joint_idx)
+{
+  auto rjo = robot.refJointOrder();
+
+  double velocity = mc_rtc::constants::toRad(
+      m_state_local.mutable_actuators(joint_idx)->velocity());
+  double friction_torque = 0.0;
+  auto qdd_r = m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
+
+  // Friction compensation logic
+  if (velocity > m_friction_vel_threshold) {
+    friction_torque =
+        m_friction_values[joint_idx] + m_viscous_values[joint_idx] * velocity;
+  } else if (velocity < -m_friction_vel_threshold) {
+    friction_torque =
+        -m_friction_values[joint_idx] + m_viscous_values[joint_idx] * velocity;
+  } else {
+    if (qdd_r > m_friction_accel_threshold) {
+      friction_torque = m_friction_values[joint_idx];
+    } else if (qdd_r < -m_friction_accel_threshold) {
+      friction_torque = -m_friction_values[joint_idx];
+    }
+  }
+  tau_fric[joint_idx] = friction_torque;
+}
+
 double KinovaRobot::currentTorqueControlLaw(
     mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local,
     Eigen::MatrixXd jacobian, double joint_idx) {
@@ -712,6 +746,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   };
 
   for (size_t i = 0; i < m_actuator_count; i++) {
+    torqueFrictionComputation(robot, m_state_local, m_jac.jacobian(robot.mb(), robot.mbc()), i);
     double kt = (i > 3) ? 0.076 : 0.11;
     if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION) {
       m_base_command.mutable_actuators(i)->set_position(
@@ -872,6 +907,17 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
   gc.setWrenches(wrenches);
   gc.setJointMotorCurrents(m_name, current);
   // gc.setJointMotorTemperatures(m_name,temp);
+
+  // Store the torque friction to the datastore
+  if(!gc.controller().datastore().has("torque_fric"))
+  {
+    gc.controller().datastore().make<Eigen::VectorXd>("torque_fric", tau_fric);
+  }
+  else
+  {
+    gc.controller().datastore().assign("torque_fric", tau_fric);
+  }
+
 }
 
 void KinovaRobot::updateControl(mc_control::MCGlobalController &controller) {
