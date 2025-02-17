@@ -82,6 +82,7 @@ private:
   double m_mu;
   double m_friction_vel_threshold;
   double m_friction_accel_threshold;
+  std::vector<double> m_stiction_values;
   std::vector<double> m_friction_values;
   std::vector<double> m_viscous_values;
   std::vector<double> m_friction_compensation_mode;
