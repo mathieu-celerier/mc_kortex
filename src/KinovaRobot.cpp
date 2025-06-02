@@ -420,6 +420,19 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     }
   }
 
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_stiction",
+      [this](std::vector<double> v) { m_stiction_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_coulomb",
+      [this](std::vector<double> v) { m_friction_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_viscous",
+      [this](std::vector<double> v) { m_viscous_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_integral_term_gain",
+      [this](double g) { m_integral_slow_gain = g; });
+
   // Initialize Jacobian object
   auto robot = &gc.robots().robot(m_name);
   m_jac = rbd::Jacobian(robot->mb(), "tool_frame");
