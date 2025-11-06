@@ -857,19 +857,19 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
     // temp[rjo[joint_idx]] = actuator.temperature_motor();
   }
 
-  fx = m_state.base().tool_external_wrench_force_x();
-  fy = m_state.base().tool_external_wrench_force_y();
-  fz = m_state.base().tool_external_wrench_force_z();
-  cx = m_state.base().tool_external_wrench_torque_x();
-  cy = m_state.base().tool_external_wrench_torque_y();
-  cz = m_state.base().tool_external_wrench_torque_z();
-  wrenches[robot.forceSensors()[0].name()] =
-      sva::ForceVecd(Eigen::Vector3d(cx, cy, cz), Eigen::Vector3d(fx, fy, fz));
+  // fx = m_state.base().tool_external_wrench_force_x();
+  // fy = m_state.base().tool_external_wrench_force_y();
+  // fz = m_state.base().tool_external_wrench_force_z();
+  // cx = m_state.base().tool_external_wrench_torque_x();
+  // cy = m_state.base().tool_external_wrench_torque_y();
+  // cz = m_state.base().tool_external_wrench_torque_z();
+  // wrenches[robot.forceSensors()[0].name()] =
+  //     sva::ForceVecd(Eigen::Vector3d(cx, cy, cz), Eigen::Vector3d(fx, fy, fz));
 
   gc.setEncoderValues(m_name, q);
   gc.setEncoderVelocities(m_name, qdot);
   gc.setJointTorques(m_name, tau);
-  gc.setWrenches(wrenches);
+  // gc.setWrenches(wrenches);
   gc.setJointMotorCurrents(m_name, current);
   // gc.setJointMotorTemperatures(m_name,temp);
 }
