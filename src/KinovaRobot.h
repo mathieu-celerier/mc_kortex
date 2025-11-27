@@ -165,7 +165,7 @@ public:
 
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                  k_api::BaseCyclic::Feedback m_state_local,
-                                 Eigen::MatrixXd jacobian, double joint_idx);
+                                 double joint_idx);
   double computeTorqueWKalman(double torque,
                               k_api::BaseCyclic::Feedback m_state_local,
                               int8_t idx);

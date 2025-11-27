@@ -409,7 +409,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
 
   // Initialize Jacobian object
   auto robot = &gc.robots().robot(m_name);
-  m_jac = rbd::Jacobian(robot->mb(), "tool_frame");
+  // m_jac = rbd::Jacobian(robot->mb(), "tool_frame");
 
   Eigen::VectorXd tu = rbd::paramToVector(robot->mb(), robot->tu());
   // Initialize each actuator to its current position
@@ -602,8 +602,7 @@ double KinovaRobot::computeTorqueWKalman(
 }
 
 double KinovaRobot::currentTorqueControlLaw(
-    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local,
-    Eigen::MatrixXd jacobian, double joint_idx) {
+    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local, double joint_idx) {
 
   auto rjo = robot.refJointOrder();
 
@@ -762,8 +761,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
       break;
     case mc_kinova::TorqueControlType::Custom:
       m_base_command.mutable_actuators(i)->set_current_motor(
-          currentTorqueControlLaw(robot, m_state_local,
-                                  m_jac.jacobian(robot.mb(), robot.mbc()), i));
+          currentTorqueControlLaw(robot, m_state_local, i));
       break;
     default:
       mc_rtc::log::error_and_throw<std::runtime_error>(
