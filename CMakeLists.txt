@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.5)
 set(PROJECT_NAME mc_kortex)
 set(PROJECT_DESCRIPTION "Kinova Kortex interface for mc-rtc")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
