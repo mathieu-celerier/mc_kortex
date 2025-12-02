@@ -9,7 +9,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(KORTEX_API_VERSION 2.6.0)
 
-project(${PROJECT_NAME} LANGUAGES C CXX VERSION 1.0.0)
+project(
+  ${PROJECT_NAME}
+  LANGUAGES C CXX
+  VERSION 1.0.0)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -17,18 +20,26 @@ find_package(mc_rtc REQUIRED)
 find_package(Boost REQUIRED COMPONENTS program_options thread)
 
 # Download kortex_api if needed
-if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+if(UNIX
+   AND NOT APPLE
+   AND NOT EMSCRIPTEN)
   add_definitions(-D_OS_UNIX)
-  set(KORTEX_API_URL "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86_64_gcc_5.4.zip")
-  file(DOWNLOAD "${KORTEX_API_URL}" "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
-  file(ARCHIVE_EXTRACT
-        INPUT "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip"
-        DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}"
+  set(KORTEX_API_URL
+      "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86_64_gcc_5.4.zip"
   )
-  set(KORTEX_ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
+  file(DOWNLOAD "${KORTEX_API_URL}"
+       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
+  file(ARCHIVE_EXTRACT INPUT
+       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip" DESTINATION
+       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
+  set(KORTEX_ROOT_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
 else()
   if(NOT DEFINED KORTEX_ROOT_DIR)
-    message(FATAL_ERROR "Kortex API must be downloaded and installed manually on your platform, you must then define KORTEX_ROOT_DIR")
+    message(
+      FATAL_ERROR
+        "Kortex API must be downloaded and installed manually on your platform, you must then define KORTEX_ROOT_DIR"
+    )
   endif()
 endif()
 
@@ -46,7 +57,7 @@ if(UNIX)
 elseif(WIN32)
   link_libraries(winMM ws2_32)
 else()
-  MESSAGE(FATAL_ERROR "Unknown os! Not supported yet")
+  message(FATAL_ERROR "Unknown os! Not supported yet")
 endif()
 
 add_subdirectory(src)

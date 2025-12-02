@@ -1,15 +1,12 @@
 #include "KinovaRobot.h"
 
-namespace mc_kortex
-{
+namespace mc_kortex {
 
-class KinovaControlLoop
-{
+class KinovaControlLoop {
 private:
-    
 public:
-    KinovaControlLoop();
-    ~KinovaControlLoop();
+  KinovaControlLoop();
+  ~KinovaControlLoop();
 };
 
 using KinovaControlLoopPtr = std::unique_ptr<KinovaControlLoop>;

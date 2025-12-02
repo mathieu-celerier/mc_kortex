@@ -601,8 +601,10 @@ double KinovaRobot::computeTorqueWKalman(
   return tau_r(idx);
 }
 
-double KinovaRobot::currentTorqueControlLaw(
-    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local, double joint_idx) {
+double
+KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
+                                     k_api::BaseCyclic::Feedback m_state_local,
+                                     double joint_idx) {
 
   auto rjo = robot.refJointOrder();
 
@@ -862,7 +864,8 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
   // cy = m_state.base().tool_external_wrench_torque_y();
   // cz = m_state.base().tool_external_wrench_torque_z();
   // wrenches[robot.forceSensors()[0].name()] =
-  //     sva::ForceVecd(Eigen::Vector3d(cx, cy, cz), Eigen::Vector3d(fx, fy, fz));
+  //     sva::ForceVecd(Eigen::Vector3d(cx, cy, cz), Eigen::Vector3d(fx, fy,
+  //     fz));
 
   gc.setEncoderValues(m_name, q);
   gc.setEncoderVelocities(m_name, qdot);

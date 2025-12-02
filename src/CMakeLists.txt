@@ -1,12 +1,6 @@
-set(mc_kortex_lib_SRC
-    mc_kortex.cpp
-    KinovaRobot.cpp
-)
+set(mc_kortex_lib_SRC mc_kortex.cpp KinovaRobot.cpp)
 
-set(mc_kortex_lib_HDR
-    mc_kortex.h
-    KinovaRobot.h
-)
+set(mc_kortex_lib_HDR mc_kortex.h KinovaRobot.h)
 
 add_library(mc_kortex_lib STATIC ${mc_kortex_lib_SRC} ${mc_kortex_lib_HDR})
 target_link_libraries(mc_kortex_lib PUBLIC mc_rtc::mc_control)
