@@ -1,3 +1,5 @@
+#! /bin/bash
+
 echo "Checking if you need to download Kortex API..."
 return_code=1
 # check if include and lib folders were copied in kortex_api or in the sub-folder passed in param
