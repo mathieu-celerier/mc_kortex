@@ -1,3 +1,4 @@
+#include "GripperCyclicMessage.pb.h"
 #include <mc_control/mc_global_controller.h>
 #include <mc_rbdyn/Robot.h>
 #include <mc_rtc/logging.h>
@@ -15,16 +16,13 @@
 #include <TransportClientUdp.h>
 
 #include <google/protobuf/util/json_util.h>
-
-#include <state-observation/observer/linear-kalman-filter.hpp>
-
 #define GEAR_RATIO 100.0
 
 namespace k_api = Kinova::Api;
 
 namespace mc_kinova {
 
-enum TorqueControlType { Default, Feedforward, Kalman, Custom };
+enum TorqueControlType {Default, Feedforward, Custom};
 
 class KinovaRobot {
 private:
@@ -74,6 +72,13 @@ private:
   double m_velocity_filter_ratio;
   std::vector<double> m_filtered_velocities;
 
+  // ===== Gripper properties =====
+  bool gripper_enabled;
+  size_t gripper_idx;
+  k_api::GripperCyclic::MotorCommand* m_gripper_motor_command;
+  float gripper_position;
+  float gripper_velocity;
+
   // ===== Custom torque control properties =====
   TorqueControlType m_torque_control_type;
 
@@ -107,27 +112,6 @@ private:
   std::vector<double> m_filter_command_w_gain;
   std::vector<double> m_lambda;
 
-  std::vector<stateObservation::LinearKalmanFilter *> vecKalmanFilt_;
-  double initPTerm = 1.0;
-  double initBiasTerm = 0.0;
-  double limitPTermMin = 0.8;
-  double limitPTermMax = 1.2;
-  double limitBiasTermMin = -1.0;
-  double limitBiasTermMax = 1.0;
-  double covarInitPTerm = 2.5e-9;
-  double covarInitBiasTerm = 2.5e-7;
-  double covarPTerm = 2.5e-9;
-  double covarBiasTerm = 2.5e-7;
-  double covarSensTerm = 2.5e-7;
-  Eigen::Matrix2d stateCovar;
-  Eigen::Matrix2d processCovar;
-  Eigen::Matrix<double, 1, 1> measureCovar;
-  Eigen::VectorXd filtAlpha;
-  Eigen::VectorXd filtBeta;
-  Eigen::VectorXd tau_r;
-  Eigen::VectorXd tau_r_theo;
-  std::vector<bool> initFilt;
-
   Eigen::VectorXd m_current_command;
   Eigen::VectorXd m_current_measurement;
   Eigen::VectorXd m_torque_from_current_measurement;
@@ -145,7 +129,6 @@ public:
   // ============================== Setter ============================== //
   void setLowServoingMode(void);
   void setSingleServoingMode(void);
-  void initKalmanFromConfig(mc_rtc::Configuration &config);
   void setCustomTorque(mc_rtc::Configuration &torque_config);
   void setControlMode(std::string mode);
   void setTorqueMode(std::string mode);
@@ -166,9 +149,6 @@ public:
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                  k_api::BaseCyclic::Feedback m_state_local,
                                  double joint_idx);
-  double computeTorqueWKalman(double torque,
-                              k_api::BaseCyclic::Feedback m_state_local,
-                              int8_t idx);
   void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
   void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
