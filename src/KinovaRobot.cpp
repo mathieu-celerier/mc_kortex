@@ -1,7 +1,4 @@
 #include "KinovaRobot.h"
-#include "Base.pb.h"
-#include <cstdlib>
-#include <iostream>
 
 namespace mc_kinova {
 
@@ -22,7 +19,7 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
   m_device_manager = nullptr;
   m_actuator_config = nullptr;
   gripper_enabled = false;
-  if(m_name.find("gripper") != std::string::npos) {
+  if (m_name.find("gripper") != std::string::npos) {
     mc_rtc::log::info("[mc_kortex] Gripper enabled for robot: {}", m_name);
     gripper_enabled = true;
   }
@@ -59,8 +56,7 @@ KinovaRobot::~KinovaRobot() {
 
 // ==================== Getter ==================== //
 
-std::vector<double> KinovaRobot::getJointPosition() 
-{
+std::vector<double> KinovaRobot::getJointPosition() {
   std::vector<double> q(m_actuator_count);
   for (auto actuator : m_state.actuators())
     q[jointIdFromCommandID(actuator.command_id())] = actuator.position();
@@ -260,12 +256,11 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   setSingleServoingMode();
   m_actuator_count = m_base->GetActuatorCount().count();
   gripper_idx = 0;
-  if( gripper_enabled ) {
+  if (gripper_enabled) {
     gripper_idx = m_actuator_count + 1;
   }
   mc_rtc::log::info("[mc_kortex] {} robot has {} actuators", m_name,
                     m_actuator_count + (gripper_enabled ? 1 : 0));
-
 
   m_filter_command.assign(m_actuator_count, 0.0);
   m_filter_command_w_gain.assign(m_actuator_count, 0.0);
@@ -318,11 +313,13 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     }
   }
 
-  if(gripper_enabled)
-  {
+  if (gripper_enabled) {
     gripper_position = 0.0;
-    m_base_command.mutable_interconnect()->mutable_command_id()->set_identifier(0);
-    m_gripper_motor_command = m_base_command.mutable_interconnect()->mutable_gripper_command()->add_motor_cmd();
+    m_base_command.mutable_interconnect()->mutable_command_id()->set_identifier(
+        0);
+    m_gripper_motor_command = m_base_command.mutable_interconnect()
+                                  ->mutable_gripper_command()
+                                  ->add_motor_cmd();
     m_gripper_motor_command->set_position(0.0);
     m_gripper_motor_command->set_velocity(0.0);
     m_gripper_motor_command->set_force(100.0);
@@ -500,8 +497,10 @@ void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data) {
   m_state = data;
 }
 
-double KinovaRobot::currentTorqueControlLaw(
-    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local, double joint_idx) {
+double
+KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
+                                     k_api::BaseCyclic::Feedback m_state_local,
+                                     double joint_idx) {
 
   auto rjo = robot.refJointOrder();
 
@@ -664,13 +663,14 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
     // m_state_local.mutable_actuators(i)->position() << " | ";
   }
 
-  if(gripper_enabled)
-  {
-    float gripper_target = robot.gripper("gripper").q()[0]*100.0;
-    float gripper_velocity_target = fabs(gripper_target - gripper_position)*2.2;//*0.001;
-    if(gripper_velocity_target > 100.0) gripper_velocity_target = 100.0;
+  if (gripper_enabled) {
+    float gripper_target = robot.gripper("gripper").q()[0] * 100.0;
+    float gripper_velocity_target =
+        fabs(gripper_target - gripper_position) * 2.2; //*0.001;
+    if (gripper_velocity_target > 100.0)
+      gripper_velocity_target = 100.0;
     m_gripper_motor_command->set_position(gripper_target);
-    m_gripper_motor_command->set_velocity( gripper_velocity_target);
+    m_gripper_motor_command->set_velocity(gripper_velocity_target);
   }
 
   // if (m_control_mode != k_api::ActuatorConfig::ControlMode::POSITION)
@@ -756,9 +756,9 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
     current[fmt::format("joint_{}", i + 1)] = m_current_measurement(i);
   }
 
-  if(gripper_enabled)
-  {
-    m_base_command.mutable_interconnect()->mutable_command_id()->set_identifier(0);
+  if (gripper_enabled) {
+    m_base_command.mutable_interconnect()->mutable_command_id()->set_identifier(
+        0);
     const auto &inter = m_state.interconnect();
     if (!inter.has_gripper_feedback()) // if API provides has_*
     {
@@ -766,23 +766,20 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
       gripper_velocity = 0.0;
     }
     // protobuf-style:
-    else if (inter.gripper_feedback().motor_size() == 0)
-    {
+    else if (inter.gripper_feedback().motor_size() == 0) {
       mc_rtc::log::warning("gripper_feedback has no motors");
       gripper_velocity = 0.0;
-    }
-    else
-    {
+    } else {
       gripper_position = inter.gripper_feedback().motor()[0].position();
       gripper_velocity = inter.gripper_feedback().motor()[0].velocity();
     }
 
-    
     q[gripper_idx] = jointPoseToRad(gripper_idx, gripper_position);
     qdot[gripper_idx] = mc_rtc::constants::toRad(gripper_velocity);
     tau[gripper_idx] = 0.0;
     // m_tau_sensor(gripper_idx) = tau[gripper_idx];
-    // m_current_measurement(gripper_idx) = m_state.interconnect().gripper_feedback().motor()[0].current_motor();
+    // m_current_measurement(gripper_idx) =
+    // m_state.interconnect().gripper_feedback().motor()[0].current_motor();
     // m_torque_from_current_measurement(gripper_idx) = 0.0;
     // current[rjo[gripper_idx]] = m_current_measurement(gripper_idx);
   }

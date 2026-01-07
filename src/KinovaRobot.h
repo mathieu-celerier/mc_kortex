@@ -1,4 +1,3 @@
-#include "GripperCyclicMessage.pb.h"
 #include <mc_control/mc_global_controller.h>
 #include <mc_rbdyn/Robot.h>
 #include <mc_rtc/logging.h>
@@ -9,6 +8,7 @@
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
 #include <DeviceManagerClientRpc.h>
+#include <GripperCyclicMessage.pb.h>
 #include <InterconnectConfigClientRpc.h>
 #include <RouterClient.h>
 #include <SessionManager.h>
@@ -22,7 +22,7 @@ namespace k_api = Kinova::Api;
 
 namespace mc_kinova {
 
-enum TorqueControlType {Default, Feedforward, Custom};
+enum TorqueControlType { Default, Feedforward, Custom };
 
 class KinovaRobot {
 private:
@@ -75,7 +75,7 @@ private:
   // ===== Gripper properties =====
   bool gripper_enabled;
   size_t gripper_idx;
-  k_api::GripperCyclic::MotorCommand* m_gripper_motor_command;
+  k_api::GripperCyclic::MotorCommand *m_gripper_motor_command;
   float gripper_position;
   float gripper_velocity;
 
