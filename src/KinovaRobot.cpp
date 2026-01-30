@@ -1,4 +1,6 @@
 #include "KinovaRobot.h"
+#include <Eigen/src/Core/Matrix.h>
+#include <mc_rtc/DataStore.h>
 
 namespace mc_kinova {
 
@@ -94,6 +96,16 @@ void KinovaRobot::setSingleServoingMode() {
 
 void KinovaRobot::setCustomTorque(mc_rtc::Configuration &torque_config) {
   if (torque_config.has("friction_compensation")) {
+    if (torque_config("friction_compensation").has("stiction")) {
+      m_stiction_values = torque_config("friction_compensation")("stiction");
+      if (not(m_stiction_values.size() == m_actuator_count))
+        mc_rtc::log::error_and_throw<std::runtime_error>(
+            "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
+            "does not match actuators count.\nActuators count = ",
+            m_name, m_actuator_count);
+    } else {
+      m_stiction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
+    }
     if (torque_config("friction_compensation").has("coulomb")) {
       m_friction_values = torque_config("friction_compensation")("coulomb");
       if (not(m_friction_values.size() == m_actuator_count))
@@ -278,6 +290,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_current_friction_compensation.assign(m_actuator_count, 0.0);
   m_jac_transpose_f.assign(m_actuator_count, 0.0);
   m_offsets.assign(m_actuator_count, 0.0);
+  tau_fric.setZero(m_actuator_count);
   m_lambda.assign(m_actuator_count, 0.0);
   m_integral_slow_theta = 1.0;
   m_integral_slow_gain = 1e-2;
@@ -364,6 +377,19 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     }
   }
 
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_stiction",
+      [this](std::vector<double> v) { m_stiction_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_coulomb",
+      [this](std::vector<double> v) { m_friction_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_friction_compensation_viscous",
+      [this](std::vector<double> v) { m_viscous_values = v; });
+  gc.controller().datastore().make_call(
+      "set_kinova_integral_term_gain",
+      [this](double g) { m_integral_slow_gain = g; });
+
   // Initialize Jacobian object
   auto robot = &gc.robots().robot(m_name);
 
@@ -410,6 +436,8 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
     gc.controller().logger().addLogEntry("kortex_friction_mode", [this]() {
       return m_friction_compensation_mode;
     });
+    gc.controller().logger().addLogEntry("torque friction",
+                                         [this]() { return tau_fric; });
     gc.controller().logger().addLogEntry(
         "kortex_friction_current_compensation",
         [this]() { return m_current_friction_compensation; });
@@ -497,6 +525,32 @@ void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data) {
   m_state = data;
 }
 
+void KinovaRobot::torqueFrictionComputation(
+    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local, double joint_idx) {
+  auto rjo = robot.refJointOrder();
+
+  double velocity = mc_rtc::constants::toRad(
+      m_state_local.mutable_actuators(joint_idx)->velocity());
+  double friction_torque = 0.0;
+  auto qdd_r = m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
+
+  // Friction compensation logic
+  if (velocity > m_friction_vel_threshold) {
+    friction_torque =
+        m_friction_values[joint_idx] + m_viscous_values[joint_idx] * velocity;
+  } else if (velocity < -m_friction_vel_threshold) {
+    friction_torque =
+        -m_friction_values[joint_idx] + m_viscous_values[joint_idx] * velocity;
+  } else {
+    if (qdd_r > m_friction_accel_threshold) {
+      friction_torque = m_friction_values[joint_idx];
+    } else if (qdd_r < -m_friction_accel_threshold) {
+      friction_torque = -m_friction_values[joint_idx];
+    }
+  }
+  tau_fric[joint_idx] = friction_torque;
+}
+
 double
 KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                      k_api::BaseCyclic::Feedback m_state_local,
@@ -541,10 +595,10 @@ KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
   } else {
     if (qdd_r > m_friction_accel_threshold) {
       m_friction_compensation_mode[joint_idx] = 1;
-      friction_torque = m_friction_values[joint_idx];
+      friction_torque = m_stiction_values[joint_idx];
     } else if (qdd_r < -m_friction_accel_threshold) {
       m_friction_compensation_mode[joint_idx] = -1;
-      friction_torque = -m_friction_values[joint_idx];
+      friction_torque = -m_stiction_values[joint_idx];
     }
   }
 
@@ -608,6 +662,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   };
 
   for (size_t i = 0; i < m_actuator_count; i++) {
+    torqueFrictionComputation(robot, m_state_local, i);
     double kt = (i > 3) ? 0.076 : 0.11;
     if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION) {
       m_base_command.mutable_actuators(i)->set_position(
@@ -788,6 +843,14 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
   gc.setEncoderVelocities(m_name, qdot);
   gc.setJointTorques(m_name, tau);
   gc.setJointMotorCurrents(m_name, current);
+  // gc.setJointMotorTemperatures(m_name,temp);
+
+  // Store the torque friction to the datastore
+  if (!gc.controller().datastore().has("torque_fric")) {
+    gc.controller().datastore().make<Eigen::VectorXd>("torque_fric", tau_fric);
+  } else {
+    gc.controller().datastore().assign("torque_fric", tau_fric);
+  }
 }
 
 void KinovaRobot::updateControl(mc_control::MCGlobalController &controller) {
@@ -1236,6 +1299,10 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
   if (m_torque_control_type == mc_kinova::TorqueControlType::Custom) {
     gc.controller().gui()->addElement(
         {"Kortex", m_name, "Friction"},
+        mc_rtc::gui::ArrayInput(
+            "Friction stiction values", gc.controller().robot().refJointOrder(),
+            [this]() { return m_stiction_values; },
+            [this](const std::vector<double> &v) { m_stiction_values = v; }),
         mc_rtc::gui::ArrayInput(
             "Friction coulomb values", gc.controller().robot().refJointOrder(),
             [this]() { return m_friction_values; },

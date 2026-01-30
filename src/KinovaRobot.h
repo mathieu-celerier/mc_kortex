@@ -87,6 +87,7 @@ private:
   double m_mu;
   double m_friction_vel_threshold;
   double m_friction_accel_threshold;
+  std::vector<double> m_stiction_values;
   std::vector<double> m_friction_values;
   std::vector<double> m_viscous_values;
   std::vector<double> m_friction_compensation_mode;
@@ -111,6 +112,8 @@ private:
   std::vector<double> m_filter_command;
   std::vector<double> m_filter_command_w_gain;
   std::vector<double> m_lambda;
+
+  Eigen::VectorXd tau_fric;
 
   Eigen::VectorXd m_current_command;
   Eigen::VectorXd m_current_measurement;
@@ -146,6 +149,9 @@ public:
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
 
+  void torqueFrictionComputation(mc_rbdyn::Robot &robot,
+                                 k_api::BaseCyclic::Feedback m_state_local, 
+                                 double joint_idx);
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                  k_api::BaseCyclic::Feedback m_state_local,
                                  double joint_idx);
