@@ -1,4 +1,14 @@
 #include "KinovaRobot.h"
+#include "ActuatorConfigClientRpc.h"
+#include "ActuatorCyclic.pb.h"
+#include "ActuatorCyclicClientRpc.h"
+#include "Base.pb.h"
+#include <cstdint>
+#include <fmt/format.h>
+#include <fmt/ranges.h>
+#include <mc_rtc/constants.h>
+#include <mc_rtc/logging.h>
+#include <stdexcept>
 
 namespace mc_kinova {
 
@@ -20,7 +30,7 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
   m_actuator_config = nullptr;
   gripper_enabled = false;
   if (m_name.find("gripper") != std::string::npos) {
-    mc_rtc::log::info("[mc_kortex] Gripper enabled for robot: {}", m_name);
+    mc_rtc::log::info("[MC_KORTEX] Gripper enabled for robot: {}", m_name);
     gripper_enabled = true;
   }
   m_state = k_api::BaseCyclic::Feedback();
@@ -74,9 +84,20 @@ void KinovaRobot::setLowServoingMode() {
 
   auto servoingMode = k_api::Base::ServoingModeInformation();
 
-  servoingMode.set_servoing_mode(k_api::Base::ServoingMode::LOW_LEVEL_SERVOING);
+  switch (m_low_level_interface_type) {
+  case LowLevelInterfaceType::Base:
+    m_servoing_mode = k_api::Base::ServoingMode::LOW_LEVEL_SERVOING;
+    break;
+  case LowLevelInterfaceType::Bypass:
+    m_servoing_mode = k_api::Base::ServoingMode::BYPASS_SERVOING;
+    break;
+  default:
+    m_servoing_mode = k_api::Base::ServoingMode::LOW_LEVEL_SERVOING;
+    break;
+  }
+
+  servoingMode.set_servoing_mode(m_servoing_mode);
   m_base->SetServoingMode(servoingMode);
-  m_servoing_mode = k_api::Base::ServoingMode::LOW_LEVEL_SERVOING;
 }
 
 void KinovaRobot::setSingleServoingMode() {
@@ -159,7 +180,7 @@ void KinovaRobot::setCustomTorque(mc_rtc::Configuration &torque_config) {
   }
 
   mc_rtc::log::info(
-      "[mc_kortex] {} robot is using custom torque control with parameters:",
+      "[MC_KORTEX] {} robot is using custom torque control with parameters:",
       m_name);
 }
 
@@ -168,7 +189,7 @@ void KinovaRobot::setControlMode(std::string mode) {
     if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION)
       return;
 
-    // mc_rtc::log::info("[mc_kortex] Using position control");
+    // mc_rtc::log::info("[MC_KORTEX] Using position control");
     m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
     m_control_mode_id++;
     return;
@@ -177,7 +198,7 @@ void KinovaRobot::setControlMode(std::string mode) {
     if (m_control_mode == k_api::ActuatorConfig::ControlMode::VELOCITY)
       return;
 
-    // mc_rtc::log::info("[mc_kortex] Using velocity control");
+    // mc_rtc::log::info("[MC_KORTEX] Using velocity control");
     m_control_mode = k_api::ActuatorConfig::ControlMode::VELOCITY;
     m_control_mode_id++;
     return;
@@ -190,7 +211,7 @@ void KinovaRobot::setControlMode(std::string mode) {
       if (m_control_mode == k_api::ActuatorConfig::ControlMode::CURRENT)
         return;
 
-      // mc_rtc::log::info("[mc_kortex] Using torque control");
+      // mc_rtc::log::info("[MC_KORTEX] Using torque control");
       initFiltersBuffers();
       m_control_mode = k_api::ActuatorConfig::ControlMode::CURRENT;
       m_control_mode_id++;
@@ -208,7 +229,7 @@ void KinovaRobot::setTorqueMode(std::string mode) {
   } else if (mode.compare("Custom") == 0) {
     m_torque_control_type = mc_kinova::TorqueControlType::Custom;
   } else {
-    mc_rtc::log::error("[mc_kortex] Unknown torque control type: {}", mode);
+    mc_rtc::log::error("[MC_KORTEX] Unknown torque control type: {}", mode);
   }
 }
 
@@ -216,7 +237,7 @@ void KinovaRobot::setTorqueMode(std::string mode) {
 
 void KinovaRobot::init(mc_control::MCGlobalController &gc,
                        mc_rtc::Configuration &kortexConfig) {
-  mc_rtc::log::info("[mc_kortex] Initializing connection to the robot at {}:{}",
+  mc_rtc::log::info("[MC_KORTEX] Initializing connection to the robot at {}:{}",
                     m_ip_address, m_port);
 
   auto error_callback = [](k_api::KError err) {
@@ -248,9 +269,18 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
 
   // Create services
   m_device_manager = new k_api::DeviceManager::DeviceManagerClient(m_router);
-  m_actuator_config = new k_api::ActuatorConfig::ActuatorConfigClient(m_router);
   m_base = new k_api::Base::BaseClient(m_router);
-  m_base_cyclic = new k_api::BaseCyclic::BaseCyclicClient(m_router_real_time);
+  m_actuator_config = new k_api::ActuatorConfig::ActuatorConfigClient(m_router);
+  if (m_low_level_interface_type == LowLevelInterfaceType::Base) {
+    m_base_cyclic = new k_api::BaseCyclic::BaseCyclicClient(m_router_real_time);
+  } else if (m_low_level_interface_type == LowLevelInterfaceType::Bypass) {
+    m_actuator_cyclic_client =
+        new k_api::ActuatorCyclic::ActuatorCyclicClient(m_router_real_time);
+  } else {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[MC_KORTEX] Incorect low-level interface type was expecting either "
+        "LowLevelInterfaceType::Base or LowLevelInterfaceType::Bypass");
+  }
 
   // Read actuators count
   setSingleServoingMode();
@@ -259,7 +289,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   if (gripper_enabled) {
     gripper_idx = m_actuator_count + 1;
   }
-  mc_rtc::log::info("[mc_kortex] {} robot has {} actuators", m_name,
+  mc_rtc::log::info("[MC_KORTEX] {} robot has {} actuators", m_name,
                     m_actuator_count + (gripper_enabled ? 1 : 0));
 
   m_filter_command.assign(m_actuator_count, 0.0);
@@ -287,6 +317,21 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   controle_mode.set_control_mode(m_control_mode);
   for (int i = 0; i < m_actuator_count; i++)
     m_actuator_config->SetControlMode(controle_mode, i + 1);
+
+  if (kortexConfig.has("low_level_type")) {
+    std::string low_level_type = kortexConfig("low_level_type");
+    if (low_level_type.compare("base") == 0) {
+      m_low_level_interface_type = LowLevelInterfaceType::Base;
+    } else if (low_level_type.compare("bypass") == 0) {
+      m_actuator_feedback_vec.assign(m_actuator_count,
+                                     k_api::ActuatorCyclic::Feedback());
+      m_low_level_interface_type = LowLevelInterfaceType::Bypass;
+    } else {
+      mc_rtc::log::error_and_throw<std::runtime_error>(
+          "[MC_KORTEX] tried to set \"low_level_type\" received incorect "
+          "value: \"{}\". Expected values are: [base, bypass]");
+    }
+  }
 
   // Init pose if desired
   if (kortexConfig.has("init_posture")) {
@@ -334,7 +379,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   if (m_use_filtered_velocities) {
     m_velocity_filter_ratio = kortexConfig("filter_velocity")("ratio", 0.0);
     mc_rtc::log::info(
-        "[mc_kortex] Filtering velocities for {} robot with {} ratio", m_name,
+        "[MC_KORTEX] Filtering velocities for {} robot with {} ratio", m_name,
         m_velocity_filter_ratio);
   }
   m_filtered_velocities.assign(m_actuator_count, 0.0);
@@ -344,7 +389,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     kortexConfig = kortexConfig("torque_control");
     if (!kortexConfig.has("mode"))
       mc_rtc::log::error_and_throw<std::runtime_error>(
-          "[mc_kortex] For {} robot, \"torque_control\" key found in config "
+          "[MC_KORTEX] For {} robot, \"torque_control\" key found in config "
           "file but \"mode\" key is missing.",
           m_name);
 
@@ -352,15 +397,15 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     if (controle_mode.compare("feedforward") == 0) {
       m_torque_control_type = mc_kinova::TorqueControlType::Feedforward;
       mc_rtc::log::info(
-          "[mc_kortex] Using feedforward only for torque control");
+          "[MC_KORTEX] Using feedforward only for torque control");
     } else if (controle_mode.compare("custom") == 0) {
       m_torque_control_type = mc_kinova::TorqueControlType::Custom;
       setCustomTorque(kortexConfig);
-      mc_rtc::log::info("[mc_kortex] Using custom control for torque control");
+      mc_rtc::log::info("[MC_KORTEX] Using custom control for torque control");
     } else {
       m_torque_control_type = mc_kinova::TorqueControlType::Default;
       mc_rtc::log::info(
-          "[mc_kortex] Using Kinova's default control for torque control");
+          "[MC_KORTEX] Using Kinova's default control for torque control");
     }
   }
 
@@ -377,7 +422,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
 
   addGui(gc);
 
-  mc_rtc::log::success("[mc_kortex] Connected succesfuly to robot at {}:{}",
+  mc_rtc::log::success("[MC_KORTEX] Connected succesfuly to robot at {}:{}",
                        m_ip_address, m_port);
 }
 
@@ -475,38 +520,34 @@ void KinovaRobot::removeLogEntry(mc_control::MCGlobalController &gc) {
 void KinovaRobot::updateState() {
   std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
   m_state = m_base_cyclic->RefreshFeedback();
+  for (int i = 0; i < m_actuator_count; i++) {
+    m_actuator_feedback_vec[i].set_position(
+        m_state.mutable_actuators(i)->position());
+    m_actuator_feedback_vec[i].set_velocity(
+        m_state.mutable_actuators(i)->velocity());
+    m_actuator_feedback_vec[i].set_torque(
+        m_state.mutable_actuators(i)->torque());
+    m_actuator_feedback_vec[i].set_current_motor(
+        m_state.mutable_actuators(i)->current_motor());
+  }
 }
 
-void KinovaRobot::updateState(bool &running) {
-  m_base_cyclic->RefreshFeedback_callback(
-      [&, this](const Kinova::Api::Error &err,
-                const k_api::BaseCyclic::Feedback data) {
-        updateState(data);
-        checkBaseFaultBanks(data.base().fault_bank_a(),
-                            data.base().fault_bank_b());
-        // checkActuatorsFaultBanks(data);
-        if (err.error_code() != k_api::ErrorCodes::ERROR_NONE) {
-          printError(err);
-          running = false;
-        }
-      });
-}
-
-void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data) {
+void KinovaRobot::updateStateBase(const k_api::BaseCyclic::Feedback data) {
   std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
   m_state = data;
 }
 
-double
-KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
-                                     k_api::BaseCyclic::Feedback m_state_local,
-                                     double joint_idx) {
+void KinovaRobot::updateStateBypass(const k_api::ActuatorCyclic::Feedback data,
+                                    int joint_id) {
+  std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
+  m_actuator_feedback_vec[joint_id - 1] = data;
+}
+
+double KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
+                                            double measured_torque,
+                                            double velocity, double joint_idx) {
 
   auto rjo = robot.refJointOrder();
-
-  double velocity = mc_rtc::constants::toRad(
-      m_state_local.mutable_actuators(joint_idx)->velocity());
-  double torque_measured = m_state_local.mutable_actuators(joint_idx)->torque();
 
   double torque_constant = (joint_idx > 3) ? 0.076 : 0.11;
   auto filter_input = m_filter_input_buffer[joint_idx];
@@ -524,7 +565,7 @@ KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
   double rotor_inertia_torque = rotor_inertia * GEAR_RATIO * GEAR_RATIO * qdd_r;
 
   double torque_error =
-      tau_desired + torque_measured; // - rotor_inertia_torque;
+      tau_desired + measured_torque; // - rotor_inertia_torque;
 
   m_prev_torque_error[joint_idx] = m_torque_error[joint_idx];
   m_torque_error[joint_idx] = torque_error;
@@ -583,7 +624,7 @@ KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
   return current;
 }
 
-bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
+bool KinovaRobot::sendCommandBase(mc_rbdyn::Robot &robot, bool &running) {
   bool return_value = true;
   k_api::BaseCyclic::Feedback m_state_local;
   {
@@ -597,9 +638,9 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   if (m_control_id == m_prev_control_id)
     return false;
 
-  auto lambda_fct = [&, this](const Kinova::Api::Error &err,
-                              const k_api::BaseCyclic::Feedback data) {
-    updateState(data);
+  auto base_callback = [&, this](const Kinova::Api::Error &err,
+                                 const k_api::BaseCyclic::Feedback data) {
+    updateStateBase(data);
     checkBaseFaultBanks(data.base().fault_bank_a(), data.base().fault_bank_b());
     if (err.error_code() != k_api::ErrorCodes::ERROR_NONE) {
       printError(err);
@@ -652,11 +693,15 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
       break;
     case mc_kinova::TorqueControlType::Custom:
       m_base_command.mutable_actuators(i)->set_current_motor(
-          currentTorqueControlLaw(robot, m_state_local, i));
+          currentTorqueControlLaw(
+              robot, m_state_local.mutable_actuators(i)->torque(),
+              mc_rtc::constants::toRad(
+                  m_state_local.mutable_actuators(i)->velocity()),
+              i));
       break;
     default:
       mc_rtc::log::error_and_throw<std::runtime_error>(
-          "[mc_kortex] wrong torque control type when trying to send command");
+          "[MC_KORTEX] wrong torque control type when trying to send command");
       break;
     }
     // std::cout << m_base_command.mutable_actuators(i)->position() << " " <<
@@ -683,7 +728,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
     control_mode.set_control_mode(m_control_mode);
 
     try {
-      mc_rtc::log::info("[mc_kortex] Changing robot control mode to {} ",
+      mc_rtc::log::info("[MC_KORTEX] Changing robot control mode to {} ",
                         m_control_mode);
       for (int i = 0; i < m_actuator_count; i++) {
         // printJointActiveControlLoop(i+1);
@@ -699,12 +744,160 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   }
 
   try {
-    m_base_cyclic->Refresh_callback(m_base_command, lambda_fct, 0);
+    m_base_cyclic->Refresh_callback(m_base_command, base_callback, 0);
     return_value = true;
   } catch (k_api::KDetailedException &ex) {
     printException(ex);
     return_value = false;
     running = false;
+  }
+
+  m_prev_control_id = m_control_id;
+  return return_value;
+}
+
+bool KinovaRobot::sendCommandBypass(mc_rbdyn::Robot &robot, bool &running) {
+  bool return_value = true;
+  std::vector<k_api::ActuatorCyclic::Feedback> m_actuators_feeback_local_vec(
+      m_actuator_count);
+  {
+    std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
+    for (int i = 0; i < m_actuators_feeback_local_vec.size(); i++) {
+      m_actuators_feeback_local_vec[i] = m_actuator_feedback_vec[i];
+    }
+  }
+
+  std::unique_lock<std::mutex> lock(m_update_control_mutex);
+  auto rjo = robot.refJointOrder();
+
+  if (m_control_id == m_prev_control_id)
+    return false;
+
+  // ========================= Control mode has changed in mc_rtc, change it for
+  // the robot ========================= //
+  if (m_control_mode_id != m_prev_control_mode_id) {
+    auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
+    control_mode.set_control_mode(m_control_mode);
+
+    try {
+      mc_rtc::log::info("[MC_KORTEX] Changing robot control mode to {} ",
+                        m_control_mode);
+      for (int i = 0; i < m_actuator_count; i++) {
+        // printJointActiveControlLoop(i+1);
+        m_actuator_config->SetControlMode(control_mode, i + 1);
+        // printJointActiveControlLoop(i+1);
+      }
+      m_prev_control_mode_id = m_control_mode_id;
+    } catch (k_api::KDetailedException &ex) {
+      printException(ex);
+      return_value = false;
+      running = false;
+    }
+  }
+
+  auto bypass_callback = [&, this](const Kinova::Api::Error &err,
+                                   const k_api::ActuatorCyclic::Feedback data) {
+    int joint_id = (data.feedback_id().identifier() & 0xFFFF0000) >> 16;
+    updateStateBypass(data, joint_id);
+    checkBaseFaultBanks(data.fault_bank_a(), data.fault_bank_b());
+    if (err.error_code() != k_api::ErrorCodes::ERROR_NONE) {
+      mc_rtc::log::error("[MC_KORTEX] Error on joint {}", joint_id);
+      printError(err);
+      running = false;
+    }
+  };
+
+  for (size_t i = 0; i < m_actuator_count; i++) {
+    k_api::ActuatorCyclic::Command command;
+
+    // command.CopyFrom(k_api::ActuatorCyclic::Command());
+    // Allocate joint number in the command MessageId
+    auto *mes_id = command.mutable_command_id();
+    mc_rtc::log::info("Address = {}, Command = {}", fmt::ptr(&command),
+                      command.command_id().identifier());
+    mes_id->set_identifier(((uint32_t)(i + 1)) << 16);
+    command.set_allocated_command_id(mes_id);
+    mc_rtc::log::info("Address = {}, Command = {}", fmt::ptr(&command),
+                      command.command_id().identifier());
+
+    double kt = (i > 3) ? 0.076 : 0.11;
+    if (m_control_mode == k_api::ActuatorConfig::ControlMode::POSITION) {
+      command.set_position(
+          radToJointPose(i, m_command.q[robot.jointIndexByName(rjo[i])][0]));
+      command.set_current_motor(
+          m_actuators_feeback_local_vec[i].current_motor());
+    } else {
+      command.set_position(m_actuators_feeback_local_vec[i].position());
+
+      auto rjo = robot.refJointOrder();
+
+      auto qdd_r = m_command.alphaD[robot.jointIndexByName(rjo[i])][0];
+
+      double tau_desired =
+          m_command.jointTorque[robot.jointIndexByName(rjo[i])][0];
+
+      double rotor_inertia =
+          robot.mb().joint(robot.jointIndexByName(rjo[i])).rotorInertia();
+
+      double rotor_inertia_torque =
+          rotor_inertia * GEAR_RATIO * GEAR_RATIO * qdd_r;
+
+      m_torque_measure_corrected[i] =
+          -m_actuators_feeback_local_vec[i].torque() + rotor_inertia_torque;
+
+      switch (m_torque_control_type) {
+      case mc_kinova::TorqueControlType::Default:
+        command.set_torque_joint(
+            m_command.jointTorque[robot.jointIndexByName(rjo[i])][0] -
+            rotor_inertia_torque);
+        break;
+      case mc_kinova::TorqueControlType::Feedforward:
+        command.set_current_motor(
+            m_command.jointTorque[robot.jointIndexByName(rjo[i])][0] /
+            (GEAR_RATIO * kt));
+        m_current_command(i) =
+            m_command.jointTorque[robot.jointIndexByName(rjo[i])][0] /
+            (GEAR_RATIO * kt);
+        break;
+      case mc_kinova::TorqueControlType::Custom:
+        command.set_current_motor(currentTorqueControlLaw(
+            robot, m_actuators_feeback_local_vec[i].torque(),
+            mc_rtc::constants::toRad(
+                m_actuators_feeback_local_vec[i].velocity()),
+            i));
+        break;
+      default:
+        mc_rtc::log::error_and_throw<std::runtime_error>(
+            "[MC_KORTEX] wrong torque control type when trying to send "
+            "command");
+        break;
+      }
+    }
+
+    // std::cout << m_base_command.mutable_actuators(i)->position() << " " <<
+    // m_state_local.mutable_actuators(i)->position() << " | ";
+
+    try {
+      mc_rtc::log::info("Address = {}, Command = {}", fmt::ptr(&command),
+                        command.command_id().identifier());
+      m_actuator_cyclic_client->Refresh_callback(command, bypass_callback,
+                                                 i + 1);
+      return_value = true;
+    } catch (k_api::KDetailedException &ex) {
+      printException(ex);
+      return_value = false;
+      running = false;
+    }
+  }
+
+  if (gripper_enabled) {
+    float gripper_target = robot.gripper("gripper").q()[0] * 100.0;
+    float gripper_velocity_target =
+        fabs(gripper_target - gripper_position) * 2.2; //*0.001;
+    if (gripper_velocity_target > 100.0)
+      gripper_velocity_target = 100.0;
+    m_gripper_motor_command->set_position(gripper_target);
+    m_gripper_motor_command->set_velocity(gripper_velocity_target);
   }
 
   m_prev_control_id = m_control_id;
@@ -735,24 +928,36 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
 
   for (size_t i = 0; i < m_actuator_count; i++) {
     double kt = (i > 3) ? 0.076 : 0.11;
-    q[i] = jointPoseToRad(i, m_state.mutable_actuators(i)->position()) +
-           m_offsets[i];
+    double actuator_pos = 0.0;
+    double actuator_vel = 0.0;
+    double actuator_torque = 0.0;
+    double actuator_current = 0.0;
+    if (m_servoing_mode == k_api::Base::ServoingMode::BYPASS_SERVOING) {
+      actuator_pos = m_actuator_feedback_vec[i].position();
+      actuator_vel = m_actuator_feedback_vec[i].velocity();
+      actuator_torque = m_actuator_feedback_vec[i].torque();
+      actuator_current = m_actuator_feedback_vec[i].current_motor();
+    } else {
+      actuator_pos = m_state.mutable_actuators(i)->position();
+      actuator_vel = m_state.mutable_actuators(i)->velocity();
+      actuator_torque = m_state.mutable_actuators(i)->torque();
+      actuator_current = m_state.mutable_actuators(i)->current_motor();
+    }
+    q[i] = jointPoseToRad(i, actuator_pos) + m_offsets[i];
+    ;
     if (m_use_filtered_velocities) {
       m_filtered_velocities[i] =
           m_velocity_filter_ratio * m_filtered_velocities[i] +
           (1 - m_velocity_filter_ratio) *
-              mc_rtc::constants::toRad(
-                  m_state.mutable_actuators(i)->velocity());
+              mc_rtc::constants::toRad(actuator_vel);
       qdot[i] = m_filtered_velocities[i];
     } else {
-      qdot[i] =
-          mc_rtc::constants::toRad(m_state.mutable_actuators(i)->velocity());
+      qdot[i] = mc_rtc::constants::toRad(actuator_vel);
     }
-    tau[i] = -m_state.mutable_actuators(i)->torque();
+    tau[i] = -actuator_torque;
     m_tau_sensor(i) = tau[i];
-    m_current_measurement(i) = m_state.mutable_actuators(i)->current_motor();
-    m_torque_from_current_measurement(i) =
-        m_state.mutable_actuators(i)->current_motor() * kt * GEAR_RATIO;
+    m_current_measurement(i) = actuator_current;
+    m_torque_from_current_measurement(i) = actuator_current * kt * GEAR_RATIO;
     current[fmt::format("joint_{}", i + 1)] = m_current_measurement(i);
   }
 
@@ -992,6 +1197,89 @@ KinovaRobot::getActuatorFaultList(uint32_t fault_bank) {
   return fault_list;
 }
 
+std::vector<std::string>
+KinovaRobot::getFeedbackStatusFlag(uint32_t status_flags) {
+  std::vector<string> status_flag_list;
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::UNKNOWN_STATUS) {
+    status_flag_list.push_back("UNKNOWN_STATUS");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::STABILIZED) {
+    status_flag_list.push_back("STABILIZED");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::MOTOR_INDEXED) {
+    status_flag_list.push_back("MOTOR_INDEXED");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::MOTOR_INDEXING) {
+    status_flag_list.push_back("MOTOR_INDEXING");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::JOINT_INDEXED) {
+    status_flag_list.push_back("JOINT_INDEXED");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::JOINT_INDEXING) {
+    status_flag_list.push_back("JOINT_INDEXING");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::HIGH_PRECISION) {
+    status_flag_list.push_back("HIGH_PRECISION");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::BRAKING) {
+    status_flag_list.push_back("BRAKING");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::SERVOING) {
+    status_flag_list.push_back("SERVOING");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::MAJOR_FAULT) {
+    status_flag_list.push_back("MAJOR_FAULT");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::MINOR_FAULT) {
+    status_flag_list.push_back("MINOR_FAULT");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::CALIBRATED_TORQUE) {
+    status_flag_list.push_back("CALIBRATED_TORQUE");
+  }
+  if (status_flags &
+      k_api::ActuatorCyclic::StatusFlags::CALIBRATED_MAG_SENSOR) {
+    status_flag_list.push_back("CALIBRATED_MAG_SENSOR");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::CALIBRATED_ZERO) {
+    status_flag_list.push_back("CALIBRATED_ZERO");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::GPIO_0) {
+    status_flag_list.push_back("GPIO_0");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::GPIO_1) {
+    status_flag_list.push_back("GPIO_1");
+  }
+  if (status_flags &
+      k_api::ActuatorCyclic::StatusFlags::CS_QUASI_STATIC_CONTACT) {
+    status_flag_list.push_back("CS_QUASI_STATIC_CONTACT");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::CS_TRANSIENT_CONTACT) {
+    status_flag_list.push_back("CS_TRANSIENT_CONTACT");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::VFD_HALL_SYNC) {
+    status_flag_list.push_back("VFD_HALL_SYNC");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::VFD_INDEXED) {
+    status_flag_list.push_back("VFD_INDEXED");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::DRIVE_BOARD_READY) {
+    status_flag_list.push_back("DRIVE_BOARD_READY");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::CALIBRATED_CURRENT) {
+    status_flag_list.push_back("CALIBRATED_CURRENT");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::CALIBRATED_MOTOR) {
+    status_flag_list.push_back("CALIBRATED_MOTOR");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::SW0_ACTIVE) {
+    status_flag_list.push_back("SW0_ACTIVE");
+  }
+  if (status_flags & k_api::ActuatorCyclic::StatusFlags::SW1_ACTIVE) {
+    status_flag_list.push_back("SW1_ACTIVE");
+  }
+  return status_flag_list;
+}
+
 void KinovaRobot::controlThread(mc_control::MCGlobalController &controller,
                                 std::mutex &startM,
                                 std::condition_variable &startCV, bool &start,
@@ -1021,11 +1309,13 @@ void KinovaRobot::controlThread(mc_control::MCGlobalController &controller,
       last = now;
 
       if (m_servoing_mode == k_api::Base::ServoingMode::LOW_LEVEL_SERVOING) {
-        sendCommand(controller.robots().robot(m_name), running);
+        sendCommandBase(controller.robots().robot(m_name), running);
         t_plot += 1e-3;
+      } else if (m_servoing_mode ==
+                 k_api::Base::ServoingMode::BYPASS_SERVOING) {
+        sendCommandBypass(controller.robots().robot(m_name), running);
       } else {
         mc_rtc::log::info("high level servoing");
-        // updateState(running);
       }
     }
 
@@ -1064,7 +1354,7 @@ void KinovaRobot::moveToHomePosition() {
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   // Move arm to "Home" position
-  mc_rtc::log::info("[mc_kortex] Moving the arm to a safe position");
+  mc_rtc::log::info("[MC_KORTEX] Moving the arm to a safe position");
   auto action_type = k_api::Base::RequestedActionType();
   action_type.set_action_type(k_api::Base::REACH_JOINT_ANGLES);
   auto action_list = m_base->ReadAllActions(action_type);
@@ -1077,7 +1367,7 @@ void KinovaRobot::moveToHomePosition() {
   }
 
   if (action_handle.identifier() == 0) {
-    mc_rtc::log::warning("[mc_kortex] Can't reach safe position, exiting");
+    mc_rtc::log::warning("[MC_KORTEX] Can't reach safe position, exiting");
   } else {
     bool action_finished = false;
     // Notify of any action topic event
@@ -1132,7 +1422,7 @@ void KinovaRobot::moveToInitPosition() {
     result = validationResult;
   } catch (k_api::KDetailedException &ex) {
     mc_rtc::log::error(
-        "[mc_kortex] Error on waypoint list to reach initial position");
+        "[MC_KORTEX] Error on waypoint list to reach initial position");
     printException(ex);
     return;
   }
@@ -1142,9 +1432,9 @@ void KinovaRobot::moveToInitPosition() {
   if (result.trajectory_error_report().trajectory_error_elements_size() == 0) {
     // Execute action
     try {
-      mc_rtc::log::info("[mc_kortex] Moving the arm to initial position");
+      mc_rtc::log::info("[MC_KORTEX] Moving the arm to initial position");
     } catch (k_api::KDetailedException &ex) {
-      mc_rtc::log::error("[mc_kortex] Error when trying to execute trajectory "
+      mc_rtc::log::error("[MC_KORTEX] Error when trying to execute trajectory "
                          "to reach initial position");
       printException(ex);
       return;
@@ -1154,15 +1444,15 @@ void KinovaRobot::moveToInitPosition() {
         finish_future_cart.wait_for(std::chrono::seconds(100));
     m_base->Unsubscribe(promise_notification_handle_cart);
     if (ang_status != std::future_status::ready) {
-      mc_rtc::log::warning("[mc_kortex] Timeout when trying to reach initial "
+      mc_rtc::log::warning("[MC_KORTEX] Timeout when trying to reach initial "
                            "position, try again");
     } else {
       const auto ang_promise_event = finish_future_cart.get();
-      mc_rtc::log::success("[mc_kortex] Angular waypoint trajectory completed");
+      mc_rtc::log::success("[MC_KORTEX] Angular waypoint trajectory completed");
     }
   } else {
     mc_rtc::log::error(
-        "[mc_kortex] Error found in trajectory to initial position");
+        "[MC_KORTEX] Error found in trajectory to initial position");
     mc_rtc::log::error(result.trajectory_error_report().DebugString());
   }
 }
@@ -1204,7 +1494,7 @@ void KinovaRobot::printJointActiveControlLoop(int joint_id) {
             std::ostream_iterator<std::string>(ss, ", "));
   ss << active_loops.back() << "]";
 
-  mc_rtc::log::info("[mc_kortex][Joint {}] Active control loops: {}", joint_id,
+  mc_rtc::log::info("[MC_KORTEX][Joint {}] Active control loops: {}", joint_id,
                     ss.str());
 }
 
@@ -1287,7 +1577,7 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
 
 void KinovaRobot::removeGui(mc_control::MCGlobalController &gc) {
   gc.controller().gui()->removeCategory({"Kortex"});
-  mc_rtc::log::success("[mc_kortex] Removed GUI");
+  mc_rtc::log::success("[MC_KORTEX] Removed GUI");
 }
 
 void KinovaRobot::addPlot(mc_control::MCGlobalController &gc) {
@@ -1336,7 +1626,12 @@ KinovaRobot::computePostureTaskOffset(mc_rbdyn::Robot &robot,
   // fmt::print("Posture task stiffness = {}\n",posture_task->stiffness());
   for (size_t i = 0; i < m_actuator_count; i++) {
     double target_pose = target[robot.jointIndexByName(rjo[i])][0];
-    double q = jointPoseToRad(i, m_state.mutable_actuators(i)->position());
+    double q = 0.0;
+    if (m_servoing_mode == k_api::Base::ServoingMode::BYPASS_SERVOING) {
+      q = jointPoseToRad(i, m_actuator_feedback_vec[i].position());
+    } else {
+      q = jointPoseToRad(i, m_state.mutable_actuators(i)->position());
+    }
     // std::cout << target_pose << " " << q << " | ";
     if (i % 2 == 0) {
       if (q > (target_pose + M_PI))
@@ -1361,26 +1656,26 @@ int64_t KinovaRobot::GetTickUs() {
 }
 
 void KinovaRobot::printError(const k_api::Error &err) {
-  mc_rtc::log::error("[mc_kortex] KError error_code: {}", err.error_code());
-  mc_rtc::log::error("[mc_kortex] KError sub_code: {}", err.error_sub_code());
-  mc_rtc::log::error("[mc_kortex] KError sub_string: {}",
+  mc_rtc::log::error("[MC_KORTEX] KError error_code: {}", err.error_code());
+  mc_rtc::log::error("[MC_KORTEX] KError sub_code: {}", err.error_sub_code());
+  mc_rtc::log::error("[MC_KORTEX] KError sub_string: {}",
                      err.error_sub_string());
 
   // Error codes by themselves are not very verbose if you don't see their
   // corresponding enum value You can use google::protobuf helpers to get the
   // string enum element for every error code and sub-code
   mc_rtc::log::error(
-      "[mc_kortex] Error code string equivalent: {}",
+      "[MC_KORTEX] Error code string equivalent: {}",
       k_api::ErrorCodes_Name(k_api::ErrorCodes(err.error_code())));
   mc_rtc::log::error(
-      "[mc_kortex] Error sub-code string equivalent: {}",
+      "[MC_KORTEX] Error sub-code string equivalent: {}",
       k_api::SubErrorCodes_Name(k_api::SubErrorCodes(err.error_sub_code())));
 }
 
 void KinovaRobot::printException(k_api::KDetailedException &ex) {
   // You can print the error informations and error codes
   auto error_info = ex.getErrorInfo().getError();
-  mc_rtc::log::error("[mc_kortex] KDetailedException detected : {}", ex.what());
+  mc_rtc::log::error("[MC_KORTEX] KDetailedException detected : {}", ex.what());
 
   printError(error_info);
 }
@@ -1389,7 +1684,7 @@ std::function<void(k_api::Base::ActionNotification)>
 KinovaRobot::check_for_end_or_abort(bool &finished) {
   return [&finished](k_api::Base::ActionNotification notification) {
     mc_rtc::log::info(
-        "[mc_kortex] EVENT : {}",
+        "[MC_KORTEX] EVENT : {}",
         k_api::Base::ActionEvent_Name(notification.action_event()));
 
     // The action is finished when we receive a END or ABORT event

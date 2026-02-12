@@ -1,3 +1,5 @@
+#include "ActuatorCyclic.pb.h"
+#include <cstdint>
 #include <mc_control/mc_global_controller.h>
 #include <mc_rbdyn/Robot.h>
 #include <mc_rtc/logging.h>
@@ -5,6 +7,7 @@
 #include <boost/circular_buffer.hpp>
 
 #include <ActuatorConfigClientRpc.h>
+#include <ActuatorCyclicClientRpc.h>
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
 #include <DeviceManagerClientRpc.h>
@@ -16,6 +19,7 @@
 #include <TransportClientUdp.h>
 
 #include <google/protobuf/util/json_util.h>
+#include <vector>
 #define GEAR_RATIO 100.0
 
 namespace k_api = Kinova::Api;
@@ -23,6 +27,7 @@ namespace k_api = Kinova::Api;
 namespace mc_kinova {
 
 enum TorqueControlType { Default, Feedforward, Custom };
+enum LowLevelInterfaceType { Base = 0, Bypass = 1 };
 
 class KinovaRobot {
 private:
@@ -36,6 +41,7 @@ private:
   k_api::BaseCyclic::BaseCyclicClient *m_base_cyclic;
   k_api::DeviceManager::DeviceManagerClient *m_device_manager;
   k_api::ActuatorConfig::ActuatorConfigClient *m_actuator_config;
+  k_api::ActuatorCyclic::ActuatorCyclicClient *m_actuator_cyclic_client;
 
   std::string m_username;
   std::string m_password;
@@ -60,11 +66,14 @@ private:
 
   std::mutex m_update_sensor_mutex;
   k_api::BaseCyclic::Feedback m_state;
+  std::vector<k_api::ActuatorCyclic::Feedback> m_actuator_feedback_vec;
 
   k_api::Base::ServoingMode m_servoing_mode;
   k_api::ActuatorConfig::ControlMode m_control_mode;
   int m_control_mode_id;
   int m_prev_control_mode_id;
+
+  LowLevelInterfaceType m_low_level_interface_type;
 
   std::vector<double> m_init_posture;
 
@@ -140,19 +149,21 @@ public:
   void removeLogEntry(mc_control::MCGlobalController &gc);
 
   void updateState();
-  void updateState(bool &running);
-  void updateState(const k_api::BaseCyclic::Feedback data);
-  bool sendCommand(mc_rbdyn::Robot &robot, bool &running);
+  void updateStateBase(const k_api::BaseCyclic::Feedback data);
+  void updateStateBypass(const k_api::ActuatorCyclic::Feedback data,
+                         int joint_id);
+  bool sendCommandBase(mc_rbdyn::Robot &robot, bool &running);
+  bool sendCommandBypass(mc_rbdyn::Robot &robot, bool &running);
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
 
-  double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local,
-                                 double joint_idx);
+  double currentTorqueControlLaw(mc_rbdyn::Robot &robot, double measured_torque,
+                                 double velocity, double joint_idx);
   void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
   void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
   std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
+  std::vector<std::string> getFeedbackStatusFlag(uint32_t status_flags);
 
   void controlThread(mc_control::MCGlobalController &controller,
                      std::mutex &startM, std::condition_variable &startCV,

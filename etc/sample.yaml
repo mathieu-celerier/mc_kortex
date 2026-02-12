@@ -1,7 +1,9 @@
 # Sample configuration for multi-robot connection
-Plugins: [ ExternalForcesEstimator ]
+Plugins: [ExternalForcesEstimator]
 
 Kortex:
+  # Use either default low-level control through Base Cyclic or bypass by controlling each device individually
+  low_level_type: base # Options: [base, bypass]
   init_posture:
     on_startup: false
     posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
@@ -10,7 +12,7 @@ Kortex:
   torque_control:
     # Parameters used in custom mode (DEPRECATED for now)
     mode: custom # If want to use modified control loop [default, feedforward, custom]
-    lambda: [7.0,7.0,7.0,7.0,7.0,7.0,7.0]
+    lambda: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
     friction_compensation:
       velocity_threshold: 0.034906585 # in rad
       acceleration_threshold: 0.5 # in rad, for cases where velocity is below threshold
