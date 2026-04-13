@@ -526,7 +526,8 @@ void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data) {
 }
 
 void KinovaRobot::torqueFrictionComputation(
-    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local, double joint_idx) {
+    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local,
+    double joint_idx) {
   auto rjo = robot.refJointOrder();
 
   double velocity = mc_rtc::constants::toRad(
@@ -577,8 +578,7 @@ KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
 
   double rotor_inertia_torque = rotor_inertia * GEAR_RATIO * GEAR_RATIO * qdd_r;
 
-  double torque_error =
-      tau_desired + torque_measured; // - rotor_inertia_torque;
+  double torque_error = tau_desired + torque_measured - rotor_inertia_torque;
 
   m_prev_torque_error[joint_idx] = m_torque_error[joint_idx];
   m_torque_error[joint_idx] = torque_error;
