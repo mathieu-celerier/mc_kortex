@@ -187,4 +187,3 @@ This repository provides a ready-to-run environment showcasing multiple control 
 [Kinova Kortex API]: https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L
 [mc-rtc-superbuild]: https://github.com/mc-rtc/mc-rtc-superbuild/
 [industry-ready-phri/mc-rtc-superbuild]: https://github.com/industry-ready-phri/mc-rtc-superbuild
-
