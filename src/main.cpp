@@ -1,6 +1,7 @@
 #include "mc_kortex.h"
 
 #include <mc_rtc/logging.h>
+#include <mc_rtc_ros/ros.h>
 #include <mc_rtc/version.h>
 
 #include <chrono>
@@ -23,7 +24,8 @@ int main(int argc, char *argv[]) {
   // clang-format off
     desc.add_options()
         ("help", "Show this help message")
-        ("init-only", po::bool_switch(), "Debug usage");
+        ("init-only", po::bool_switch(), "Initialize only, do not run the control loop")
+        ("debug", po::bool_switch(), "Enable targeted low-level bypass debug logging");
   // clang-format on
 
   po::variables_map vm;
@@ -42,7 +44,8 @@ int main(int argc, char *argv[]) {
   }
   auto kortexConfig = gconfig.config("Kortex");
 
-  void *data = mc_kortex::global_thread_init(gconfig);
+  void *data = mc_kortex::global_thread_init(gconfig,
+                                             vm["debug"].as<bool>());
   if (!data) {
     printf("Initialization failed\n");
     return -2;
@@ -51,6 +54,8 @@ int main(int argc, char *argv[]) {
   // ==================== Run control loop ==================== //
   if (!vm["init-only"].as<bool>())
     mc_kortex::run(data);
+
+  mc_rtc::ROSBridge::shutdown();
 
   return 0;
 }

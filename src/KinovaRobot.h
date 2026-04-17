@@ -10,8 +10,11 @@
 #include <ActuatorCyclicClientRpc.h>
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
+#include <DeviceConfigClientRpc.h>
 #include <DeviceManagerClientRpc.h>
 #include <GripperCyclicMessage.pb.h>
+#include <InterconnectCyclicClientRpc.h>
+#include <InterconnectCyclicMessage.pb.h>
 #include <InterconnectConfigClientRpc.h>
 #include <RouterClient.h>
 #include <SessionManager.h>
@@ -19,6 +22,8 @@
 #include <TransportClientUdp.h>
 
 #include <google/protobuf/util/json_util.h>
+#include <atomic>
+#include <condition_variable>
 #include <vector>
 #define GEAR_RATIO 100.0
 
@@ -28,6 +33,26 @@ namespace mc_kinova {
 
 enum TorqueControlType { Default, Feedforward, Custom };
 enum LowLevelInterfaceType { Base = 0, Bypass = 1 };
+
+struct BypassActuatorClient {
+  std::string ip_address;
+  uint32_t device_id = 0;
+  uint32_t order = 0;
+  k_api::TransportClientUdp *transport = nullptr;
+  k_api::RouterClient *router = nullptr;
+  k_api::ActuatorConfig::ActuatorConfigClient *actuator_config = nullptr;
+  k_api::ActuatorCyclic::ActuatorCyclicClient *actuator_cyclic = nullptr;
+};
+
+struct BypassInterconnectClient {
+  std::string ip_address;
+  uint32_t device_id = 0;
+  uint32_t order = 0;
+  k_api::TransportClientUdp *transport = nullptr;
+  k_api::RouterClient *router = nullptr;
+  k_api::InterconnectCyclic::InterconnectCyclicClient *interconnect_cyclic =
+      nullptr;
+};
 
 class KinovaRobot {
 private:
@@ -40,8 +65,10 @@ private:
   k_api::Base::BaseClient *m_base;
   k_api::BaseCyclic::BaseCyclicClient *m_base_cyclic;
   k_api::DeviceManager::DeviceManagerClient *m_device_manager;
+  k_api::DeviceConfig::DeviceConfigClient *m_device_config;
   k_api::ActuatorConfig::ActuatorConfigClient *m_actuator_config;
-  k_api::ActuatorCyclic::ActuatorCyclicClient *m_actuator_cyclic_client;
+  std::vector<BypassActuatorClient> m_bypass_actuator_clients;
+  BypassInterconnectClient m_bypass_interconnect_client;
 
   std::string m_username;
   std::string m_password;
@@ -52,7 +79,7 @@ private:
   std::string m_name;
   int m_actuator_count;
 
-  bool stop_controller;
+  std::atomic<bool> stop_controller;
 
   int64_t m_dt;
 
@@ -72,6 +99,7 @@ private:
   k_api::ActuatorConfig::ControlMode m_control_mode;
   int m_control_mode_id;
   int m_prev_control_mode_id;
+  uint32_t m_bypass_command_id;
 
   LowLevelInterfaceType m_low_level_interface_type;
 
@@ -85,8 +113,19 @@ private:
   bool gripper_enabled;
   size_t gripper_idx;
   k_api::GripperCyclic::MotorCommand *m_gripper_motor_command;
+  k_api::GripperCyclic::MotorCommand *m_interconnect_gripper_motor_command;
   float gripper_position;
   float gripper_velocity;
+  k_api::InterconnectCyclic::Command m_interconnect_command;
+  k_api::InterconnectCyclic::Feedback m_interconnect_feedback;
+  bool m_debug_enabled;
+  std::vector<bool> m_debug_bypass_init_logged;
+  std::vector<bool> m_debug_bypass_command_logged;
+  std::vector<bool> m_debug_bypass_feedback_logged;
+  std::vector<size_t> m_bypass_joint_for_actuator;
+  std::vector<size_t> m_bypass_actuator_for_joint;
+  bool m_debug_bypass_gripper_command_logged;
+  bool m_debug_bypass_gripper_feedback_logged;
 
   // ===== Custom torque control properties =====
   TorqueControlType m_torque_control_type;
@@ -128,15 +167,19 @@ private:
   Eigen::VectorXd m_current_measurement;
   Eigen::VectorXd m_torque_from_current_measurement;
   Eigen::VectorXd m_tau_sensor;
+  std::atomic<bool> m_control_ready;
+  std::atomic<bool> m_command_ready;
 
 public:
   KinovaRobot(const std::string &name, const std::string &ip_address,
-              const std::string &username, const std::string &password);
+              const std::string &username, const std::string &password,
+              bool debug_enabled = false);
   ~KinovaRobot();
 
   // ============================== Getter ============================== //
   std::vector<double> getJointPosition(void);
   std::string getName(void);
+  bool controlReady() const;
 
   // ============================== Setter ============================== //
   void setLowServoingMode(void);
@@ -144,6 +187,8 @@ public:
   void setCustomTorque(mc_rtc::Configuration &torque_config);
   void setControlMode(std::string mode);
   void setTorqueMode(std::string mode);
+  void debugLog(const std::string &msg);
+  void debugDiscoverDevices();
 
   void init(mc_control::MCGlobalController &gc,
             mc_rtc::Configuration
@@ -154,18 +199,23 @@ public:
   void updateState();
   void updateStateBase(const k_api::BaseCyclic::Feedback data);
   void updateStateBypass(const k_api::ActuatorCyclic::Feedback data,
-                         int joint_id);
+                         size_t joint_idx);
   bool sendCommandBase(mc_rbdyn::Robot &robot, bool &running);
   bool sendCommandBypass(mc_rbdyn::Robot &robot, bool &running);
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
 
   void torqueFrictionComputation(mc_rbdyn::Robot &robot,
+                                 const rbd::MultiBodyConfig &command,
                                  k_api::BaseCyclic::Feedback m_state_local,
                                  double joint_idx);
-  double currentTorqueControlLaw(mc_rbdyn::Robot &robot, double measured_torque,
-                                 double velocity, double joint_idx);
+  double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
+                                 const rbd::MultiBodyConfig &command,
+                                 double measured_torque, double velocity,
+                                 double joint_idx);
   void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
+  void checkActuatorFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b,
+                               size_t joint_idx);
   void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
   std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
@@ -189,6 +239,31 @@ public:
   // ============================== //
 private:
   void initFiltersBuffers(void);
+  bool validateServoingMode(k_api::Base::ServoingMode mode);
+  void clearBypassDeviceClients();
+  void createBypassDeviceClients();
+  k_api::ActuatorConfig::ActuatorConfigClient *
+  actuatorConfigClient(size_t joint_idx);
+  k_api::ActuatorCyclic::ActuatorCyclicClient *
+  actuatorCyclicClient(size_t joint_idx);
+  k_api::InterconnectCyclic::InterconnectCyclicClient *
+  interconnectCyclicClient();
+  void setActuatorControlMode(
+      size_t joint_idx,
+      const k_api::ActuatorConfig::ControlModeInformation &control_mode);
+  void setActuatorCommandMode(
+      size_t joint_idx,
+      const k_api::ActuatorConfig::CommandModeInformation &command_mode);
+  void setActuatorServoing(
+      size_t joint_idx, const k_api::ActuatorConfig::Servoing &servoing);
+  void clearActuatorFaults(size_t joint_idx);
+  bool hasValidCommand(const mc_rbdyn::Robot &robot) const;
+  void updateBypassJointMapping(
+      const std::vector<k_api::ActuatorCyclic::Feedback> &raw_feedbacks);
+  void initializeBypass();
+  void updateBypassGripperState(const k_api::InterconnectCyclic::Feedback &data);
+  void updateGripperCommand(mc_rbdyn::Robot &robot);
+  std::string ipv4ToString(uint32_t ipv4) const;
 
   void addGui(mc_control::MCGlobalController &gc);
   void removeGui(mc_control::MCGlobalController &gc);

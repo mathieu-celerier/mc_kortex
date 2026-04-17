@@ -1,9 +1,27 @@
 #include "mc_kortex.h"
 
+#include <mc_rtc_ros/ros.h>
+
 namespace mc_kortex {
 
+namespace {
+
+void stopRobotPublishers(mc_control::MCGlobalController &controller) {
+  auto stop_publishers = [](const std::string &prefix, mc_rbdyn::Robots &robots) {
+    for (auto &r : robots) {
+      mc_rtc::ROSBridge::stop_robot_publisher(prefix + r.name());
+    }
+  };
+
+  stop_publishers("control/", controller.controller().robots());
+  stop_publishers("real/", controller.controller().realRobots());
+}
+
+} // namespace
+
 void *global_thread_init(
-    mc_control::MCGlobalController::GlobalConfiguration &gconfig) {
+    mc_control::MCGlobalController::GlobalConfiguration &gconfig,
+    bool debug_enabled) {
   auto kortexConfig = gconfig.config("Kortex");
   auto loop_data = new ControlLoopData();
   // Create mc_rtc's global controller
@@ -45,7 +63,8 @@ void *global_thread_init(
                 lock, [&kinovas_init_ready]() { return kinovas_init_ready; });
           }
           auto kinova = std::unique_ptr<mc_kinova::KinovaRobot>(
-              new mc_kinova::KinovaRobot(robot.name(), ip, username, password));
+              new mc_kinova::KinovaRobot(robot.name(), ip, username, password,
+                                         debug_enabled));
           std::unique_lock<std::mutex> lock(kinova_init_mutex);
           kinovas.emplace_back(std::move(kinova));
         });
@@ -67,6 +86,9 @@ void *global_thread_init(
   std::vector<double> qInit = robots.robot().encoderValues();
   mc_rtc::log::info("qInit = {}", mc_kinova::printVec(qInit));
   controller.init(qInit);
+  for (auto &kinova : kinovas) {
+    kinova->updateControl(controller);
+  }
   controller.running = true;
   controller.controller().gui()->addElement(
       {"Kortex"}, mc_rtc::gui::Button("Stop controller", [&controller]() {
@@ -78,70 +100,134 @@ void *global_thread_init(
   static std::condition_variable startCV;
   static bool startControl = false;
   for (auto &kinova : kinovas) {
-    loop_data->kinova_threads->emplace_back([&]() {
-      kinova->controlThread(controller, startMutex, startCV, startControl,
-                            controller.running);
+    auto *kinova_ptr = kinova.get();
+    loop_data->kinova_threads->emplace_back([&, kinova_ptr]() {
+      kinova_ptr->controlThread(controller, startMutex, startCV, startControl,
+                                controller.running);
     });
   }
   startControl = true;
   startCV.notify_all();
 
-  return loop_data;
-}
+  loop_data->controller_run = new std::thread([loop_data]() {
+    auto controller_ptr = loop_data->controller;
+    auto &controller = *controller_ptr;
+    auto &kinovas = *loop_data->kinovas;
+    uint64_t last_run_id = 0;
 
-void run(void *data) {
-  mc_rtc::log::info("[mc_kortex] Starting control loop");
-  auto control_data = static_cast<mc_kortex::ControlLoopData *>(data);
-  auto controller_ptr = control_data->controller;
-  auto &controller = *controller_ptr;
-  auto &kinovas = *control_data->kinovas;
+    while (controller.running) {
+      {
+        std::unique_lock<std::mutex> lock(loop_data->controller_run_mutex);
+        loop_data->controller_run_cv.wait(lock, [&]() {
+          return !controller.running ||
+                 loop_data->controller_run_id != last_run_id;
+        });
+        if (!controller.running) {
+          break;
+        }
+        last_run_id = loop_data->controller_run_id;
+      }
 
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  double now = 0;
-  double last = ts.tv_sec * 1e6 + ts.tv_nsec * 1e-3;
-  controller.controller().logger().addLogEntry(
-      "perf_LoopDt", [&]() { return (now - last) / 1000; });
-
-  while (controller.running) {
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    now = ts.tv_sec * 1e6 + ts.tv_nsec * 1e-3;
-    if (now - last > controller.timestep() * 1e6) {
-      // mc_rtc::log::info("[mc_kortex] Control loop elapsed time {}ms",
-      // (now-last)*1e-3);
+      bool kinovas_ready = true;
       for (auto &kinova : kinovas) {
-        if (controller.controller().datastore().has("TorqueMode"))
+        kinovas_ready = kinovas_ready && kinova->controlReady();
+      }
+      if (!kinovas_ready) {
+        continue;
+      }
+
+      for (auto &kinova : kinovas) {
+        if (controller.controller().datastore().has("TorqueMode")) {
           kinova->setTorqueMode(
               controller.controller().datastore().get<std::string>(
                   "TorqueMode"));
-        if (controller.controller().datastore().has("ControlMode"))
+        }
+        if (controller.controller().datastore().has("ControlMode")) {
           kinova->setControlMode(
               controller.controller().datastore().get<std::string>(
                   "ControlMode"));
+        }
         kinova->updateSensors(controller);
       }
 
-      // Run the controller
       controller.run();
 
       for (auto &kinova : kinovas) {
         kinova->updateControl(controller);
       }
-
-      last = now;
     }
+  });
+
+  return loop_data;
+}
+
+void run(void *data) {
+  auto control_data = static_cast<mc_kortex::ControlLoopData *>(data);
+  auto controller_ptr = control_data->controller;
+  auto &controller = *controller_ptr;
+  auto &kinovas = *control_data->kinovas;
+
+  while (controller.running) {
+    bool kinovas_ready = true;
+    for (auto &kinova : kinovas) {
+      kinovas_ready = kinovas_ready && kinova->controlReady();
+    }
+    if (kinovas_ready) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+
+  mc_rtc::log::info(
+      "[mc_kortex] Kinova threads ready, entering periodic control loop");
+
+  auto next_cycle = std::chrono::steady_clock::now();
+  double loop_dt_ms = 0.0;
+  auto last_cycle = next_cycle;
+  controller.controller().logger().addLogEntry(
+      "perf_LoopDt", [&]() { return loop_dt_ms; });
+
+  while (controller.running) {
+    next_cycle += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(controller.timestep()));
+    std::this_thread::sleep_until(next_cycle);
+    const auto now = std::chrono::steady_clock::now();
+    loop_dt_ms =
+        std::chrono::duration<double, std::milli>(now - last_cycle).count();
+    last_cycle = now;
+
+    {
+      std::lock_guard<std::mutex> lock(control_data->controller_run_mutex);
+      control_data->controller_run_id++;
+    }
+    control_data->controller_run_cv.notify_one();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(control_data->controller_run_mutex);
+    control_data->controller_run_id++;
+  }
+  control_data->controller_run_cv.notify_all();
 
   for (auto &kinova : kinovas) {
     kinova->stopController();
+  }
+
+  if (control_data->controller_run) {
+    control_data->controller_run->join();
+    delete control_data->controller_run;
   }
 
   for (auto &th : *control_data->kinova_threads) {
     th.join();
   }
 
+  stopRobotPublishers(controller);
+
   delete control_data->kinovas;
+  delete control_data->kinova_threads;
   delete controller_ptr;
+  delete control_data;
 }
 
 } // namespace mc_kortex
