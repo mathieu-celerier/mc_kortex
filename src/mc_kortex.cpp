@@ -1,5 +1,7 @@
 #include "mc_kortex.h"
 
+#include "KortexConfig.h"
+
 namespace mc_kortex {
 
 void *global_thread_init(
@@ -22,9 +24,24 @@ void *global_thread_init(
     controller.realRobots().robotCopy(robots.robot(i), robots.robot(i).name());
   }
 
+  // A Kortex level section that is neither the defaults nor a robot of the
+  // controller configures nothing: most likely a typo or a setting left at
+  // the Kortex level when the configuration moved to a "default" section
+  for (const auto &key : kortexConfig.keys()) {
+    if (key == "default" || !kortexConfig(key).isObject() ||
+        robots.hasRobot(key)) {
+      continue;
+    }
+    mc_rtc::log::warning("[mc_kortex] Ignoring the \"{}\" section: no robot of "
+                         "the controller goes by that name",
+                         key);
+  }
+
   // Initialize controlled kinova robot
   loop_data->kinovas = new std::vector<mc_kinova::KinovaRobotPtr>();
   auto &kinovas = *loop_data->kinovas;
+  // Configuration of each robot, defaults included, kept for init() below
+  std::map<std::string, mc_rtc::Configuration> kinova_configs;
   {
     std::vector<std::thread> kinova_init_threads;
     std::mutex kinova_init_mutex;
@@ -34,26 +51,32 @@ void *global_thread_init(
       if (robot.mb().nrDof() == 0) {
         continue;
       }
-      if (kortexConfig.has(robot.name())) {
-        std::string ip = kortexConfig(robot.name())("ip");
-        std::string username = kortexConfig(robot.name())("username");
-        std::string password = kortexConfig(robot.name())("password");
-        kinova_init_threads.emplace_back([&, ip, username, password]() {
-          {
-            std::unique_lock<std::mutex> lock(kinova_init_mutex);
-            kinova_init_cv.wait(
-                lock, [&kinovas_init_ready]() { return kinovas_init_ready; });
-          }
-          auto kinova = std::unique_ptr<mc_kinova::KinovaRobot>(
-              new mc_kinova::KinovaRobot(robot.name(), ip, username, password));
-          std::unique_lock<std::mutex> lock(kinova_init_mutex);
-          kinovas.emplace_back(std::move(kinova));
-        });
-      } else {
+      // The "default" section applies to every robot, a section named after
+      // the robot overrides it
+      auto robotConfig =
+          mc_kinova::robotConfiguration(kortexConfig, robot.name());
+      auto params = mc_kinova::connectionParameters(robotConfig);
+      if (params.ip_address.empty()) {
         mc_rtc::log::warning("The loaded controller uses an actuated robot "
                              "that is not configured and not ignored: {}",
                              robot.name());
+        continue;
       }
+      mc_rtc::log::info("[mc_kortex] {} robot will connect to {}", robot.name(),
+                        params.ip_address);
+      kinova_configs[robot.name()] = robotConfig;
+      kinova_init_threads.emplace_back([&, params]() {
+        {
+          std::unique_lock<std::mutex> lock(kinova_init_mutex);
+          kinova_init_cv.wait(
+              lock, [&kinovas_init_ready]() { return kinovas_init_ready; });
+        }
+        auto kinova = std::unique_ptr<mc_kinova::KinovaRobot>(
+            new mc_kinova::KinovaRobot(robot.name(), params.ip_address,
+                                       params.username, params.password));
+        std::unique_lock<std::mutex> lock(kinova_init_mutex);
+        kinovas.emplace_back(std::move(kinova));
+      });
     }
     kinovas_init_ready = true;
     kinova_init_cv.notify_all();
@@ -62,7 +85,7 @@ void *global_thread_init(
     }
   }
   for (auto &kinova : kinovas) {
-    kinova->init(controller, kortexConfig);
+    kinova->init(controller, kinova_configs[kinova->getName()]);
   }
   std::vector<double> qInit = robots.robot().encoderValues();
   mc_rtc::log::info("qInit = {}", mc_kinova::printVec(qInit));
