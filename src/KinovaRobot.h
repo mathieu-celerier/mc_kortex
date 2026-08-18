@@ -50,8 +50,6 @@ private:
 
   int64_t m_dt;
 
-  double t_plot;
-
   int m_control_id;
   int m_prev_control_id;
   std::mutex m_update_control_mutex;
@@ -122,7 +120,8 @@ private:
 
 public:
   KinovaRobot(const std::string &name, const std::string &ip_address,
-              const std::string &username, const std::string &password);
+              const std::string &username = "admin",
+              const std::string &password = "admin");
   ~KinovaRobot();
 
   // ============================== Getter ============================== //
@@ -146,19 +145,19 @@ public:
 
   void updateState();
   void updateState(bool &running);
-  void updateState(const k_api::BaseCyclic::Feedback data);
+  void updateState(const k_api::BaseCyclic::Feedback &data);
   bool sendCommand(mc_rbdyn::Robot &robot, bool &running);
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
 
   void torqueFrictionComputation(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local,
-                                 double joint_idx);
+                                 const k_api::BaseCyclic::Feedback &state,
+                                 size_t joint_idx);
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local,
-                                 double joint_idx);
+                                 const k_api::BaseCyclic::Feedback &state,
+                                 size_t joint_idx);
   void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
-  void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
+  void checkActuatorsFaultBanks(const k_api::BaseCyclic::Feedback &feedback);
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
   std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
 
@@ -184,9 +183,6 @@ private:
   void addGui(mc_control::MCGlobalController &gc);
   void removeGui(mc_control::MCGlobalController &gc);
 
-  void addPlot(mc_control::MCGlobalController &gc);
-  void removePlot(mc_control::MCGlobalController &gc);
-
   double jointPoseToRad(int joint_idx, double deg);
   double radToJointPose(int joint_idx, double rad);
   std::vector<double>
@@ -205,6 +201,6 @@ private:
 
 using KinovaRobotPtr = std::unique_ptr<KinovaRobot>;
 
-std::string printVec(std::vector<double> vec);
+std::string printVec(const std::vector<double> &vec);
 
 } // namespace mc_kinova
