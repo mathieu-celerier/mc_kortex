@@ -2,24 +2,40 @@
 Plugins: [ ExternalForcesEstimator ]
 
 Kortex:
-  init_posture:
-    on_startup: false
-    posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
-  filter_velocity:
-    ratio: 0.97
-  torque_control:
-    # Parameters used in custom mode (DEPRECATED for now)
-    mode: custom # If want to use modified control loop [default, feedforward, custom]
-    lambda: [7.0,7.0,7.0,7.0,7.0,7.0,7.0]
-    friction_compensation:
-      velocity_threshold: 0.034906585 # in rad
-      acceleration_threshold: 0.5 # in rad, for cases where velocity is below threshold
-      compensation_values: [2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8]
-    integral_term:
-      mu: 0.9
-      gains: [10.0, 10.0, 10.0, 10.0, 300.0, 400.0, 800.0]
-
-  kinova: # Name of the robot in the controller
+  # Settings shared by every robot of the controller
+  default:
     ip: 192.168.1.10
     username: your_username
     password: your_password
+
+    init_posture:
+      on_startup: false
+      posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
+
+    filter_velocity:
+      ratio: 0.97
+
+    torque_control:
+      # If want to use modified control loop [default, feedforward, custom]
+      mode: custom
+
+      # Parameters below are only used in custom mode
+      # Gain on the Kortex API transfer function
+      lambda: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+
+      friction_compensation:
+        velocity_threshold: 0.034906585 # in rad/s
+        acceleration_threshold: 0.5 # in rad/s^2, used when velocity is below threshold
+        stiction: [2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8]
+        coulomb: [2.8, 2.8, 2.8, 2.8, 1.8, 1.8, 1.8]
+        viscous: [2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1]
+
+      # Leaky integrator, summed with the Kortex transfer function
+      integral_term:
+        theta: 0.1 # time constant
+        gain: 1e-3
+
+  # A section named after a robot of the controller is merged on top of the
+  # defaults, key by key. Robots using the shared settings need no section.
+  kinova_second_arm:
+    ip: 192.168.1.11

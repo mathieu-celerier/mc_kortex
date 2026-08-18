@@ -1,4 +1,5 @@
 #include "KinovaDiagnostic.h"
+#include "KortexConfig.h"
 #include "mc_kortex.h"
 
 #include <mc_rtc/logging.h>
@@ -54,32 +55,49 @@ int main(int argc, char *argv[]) {
   // ==================== Diagnostic mode ==================== //
   // The diagnostic talks to the arm directly: it must stay usable when the
   // controller itself cannot be started.
-  if (vm["diagnostic"].as<bool>() || vm["diagnostic-reset-servoing"].as<bool>()) {
+  if (vm["diagnostic"].as<bool>() ||
+      vm["diagnostic-reset-servoing"].as<bool>()) {
     auto only_robot = vm["robot"].as<std::string>();
     int status = 0;
     size_t diagnosed = 0;
+
+    // What to diagnose: the robot asked for, or the connection defaults
+    // followed by every robot section that overrides them
+    std::vector<std::pair<std::string, mc_kinova::ConnectionParameters>>
+        targets;
+    if (!only_robot.empty()) {
+      targets.emplace_back(only_robot, mc_kinova::connectionParameters(
+                                           kortexConfig, only_robot));
+    } else {
+      auto defaults = mc_kinova::connectionParameters(kortexConfig, "");
+      if (!defaults.ip_address.empty()) {
+        targets.emplace_back("default", defaults);
+      }
+      for (const auto &name : mc_kinova::robotSections(kortexConfig)) {
+        targets.emplace_back(
+            name, mc_kinova::connectionParameters(kortexConfig, name));
+      }
+    }
+
     // Several robot entries usually point at the same arm, diagnosing it once
     // is enough
     std::set<std::string> diagnosed_ips;
-    for (const auto &key : kortexConfig.keys()) {
-      auto entry = kortexConfig(key);
-      if (!entry.has("ip")) {
+    for (const auto &target : targets) {
+      const auto &key = target.first;
+      const auto &params = target.second;
+      if (params.ip_address.empty()) {
         continue;
       }
-      if (!only_robot.empty() && key != only_robot) {
-        continue;
-      }
-      std::string ip = entry("ip");
-      if (!diagnosed_ips.insert(ip).second) {
+      if (!diagnosed_ips.insert(params.ip_address).second) {
         mc_rtc::log::info("[mc_kortex] Skipping {}, {} was already diagnosed",
-                          key, ip);
+                          key, params.ip_address);
         continue;
       }
       mc_kinova::DiagnosticOptions opts;
       opts.name = key;
-      opts.ip_address = ip;
-      opts.username = entry("username", std::string("admin"));
-      opts.password = entry("password", std::string("admin"));
+      opts.ip_address = params.ip_address;
+      opts.username = params.username;
+      opts.password = params.password;
       opts.duration = vm["diagnostic-duration"].as<double>();
       opts.low_level = vm["diagnostic-low-level"].as<bool>();
       opts.low_level_duration =

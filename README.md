@@ -111,56 +111,63 @@ Timestep: 0.001
 LogPolicy: threaded
 
 Kortex:
-  init_posture:
-    on_startup: false
-    posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
-
-  torque_control:
-    mode: custom  # Options: default, feedforward, custom
-
-    # Gain on the Kortex API transfer function
-    lambda: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-
-    friction_compensation:
-      velocity_threshold: 0.05        # rad/s
-      acceleration_threshold: 1.0     # rad/s^2 (used when velocity is below threshold)
-
-      # Example friction parameters — tune for your robot
-      stiction: [4.0, 4.0, 4.0, 4.0, 1.5, 1.5, 1.5]
-      coulomb:  [3.5, 3.5, 3.5, 3.5, 1.2, 1.2, 1.2]
-      viscous:  [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
-
-    # Leaky integrator, sum with the Kortex transfer function
-    integral_term:
-      theta: 2
-      gain: 10
-
-  # Robot connection parameters
-  kinova:
+  # Settings shared by every robot of the controller
+  default:
     ip: 192.168.1.10
     username: admin   # Default username (may differ on your setup)
     password: admin   # Default password
 
-  kinova_bota:
-    ip: 192.168.1.10
-    username: admin
-    password: admin
+    init_posture:
+      on_startup: false
+      posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
 
-  kinova_bota_ds4:
-    ip: 192.168.1.10
-    username: admin
-    password: admin
+    torque_control:
+      mode: custom  # Options: default, feedforward, custom
 
-  kinova_camera:
-    ip: 192.168.1.10
-    username: admin
-    password: admin
+      # Gain on the Kortex API transfer function
+      lambda: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
-  kinova_camera_gripper:
-    ip: 192.168.1.10
-    username: admin
-    password: admin
+      friction_compensation:
+        velocity_threshold: 0.05        # rad/s
+        acceleration_threshold: 1.0     # rad/s^2 (used when velocity is below threshold)
+
+        # Example friction parameters — tune for your robot
+        stiction: [4.0, 4.0, 4.0, 4.0, 1.5, 1.5, 1.5]
+        coulomb:  [3.5, 3.5, 3.5, 3.5, 1.2, 1.2, 1.2]
+        viscous:  [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+
+      # Leaky integrator, sum with the Kortex transfer function
+      integral_term:
+        theta: 2
+        gain: 10
+
+  # Optional: a section named after a robot overrides the defaults for that
+  # robot only. Robots that use the shared settings need no section at all.
+  kinova_second_arm:
+    ip: 192.168.1.11
+    torque_control:
+      mode: feedforward
 ```
+
+### Defaults and per-robot overrides
+
+Everything under `default` applies to every actuated robot of the controller,
+so the usual case of several robot variants pointing at the same arm is written
+once. A section named after a robot is merged on top of the defaults,
+recursively and key by key: `kinova_second_arm` above changes its address and
+its torque control mode while keeping the shared credentials, friction
+parameters and initial posture.
+
+`username` and `password` fall back to `admin` when neither level sets them.
+`ip` has none: a robot for which neither level provides an address is reported
+as not configured and left alone. A section that matches no robot of the
+controller configures nothing and is reported as such, which also catches a
+misspelled robot name.
+
+Configurations written before `default` existed, with the settings directly
+under `Kortex` and the connection parameters repeated in each robot section,
+are read exactly as they used to be: without a `default` section, the `Kortex`
+section itself provides the defaults.
 
 ---
 
@@ -190,12 +197,15 @@ calibration block and the raw strain gauges. See
 ```bash
 mc_kortex --diagnostic                        # 3s sampling window
 mc_kortex --diagnostic --diagnostic-duration 10
-mc_kortex --diagnostic --robot kinova_bota    # a single entry of the Kortex section
+mc_kortex --diagnostic --robot kinova_bota    # a single robot of the Kortex section
 mc_kortex --diagnostic --diagnostic-dump gauges.csv  # every gauge sample to CSV
 ```
 
-Connection parameters are taken from the `Kortex` section of your `mc_rtc.yaml`;
-entries sharing an IP address are diagnosed once.
+Connection parameters are taken from the `Kortex` section of your `mc_rtc.yaml`:
+the `default` section, then every robot section that overrides it. Entries sharing
+an IP address are diagnosed once, so a set of variants pointing at the same arm
+produces a single report. `--robot <name>` resolves that robot's parameters even
+when it has no section of its own.
 
 For every actuator the report gives:
 
