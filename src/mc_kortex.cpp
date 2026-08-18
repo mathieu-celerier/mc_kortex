@@ -81,7 +81,12 @@ void *global_thread_init(
         kinovas.emplace_back(std::move(kinova));
       });
     }
-    kinovas_init_ready = true;
+    {
+      // The predicate must be published under the mutex, otherwise a thread
+      // that is about to wait can miss the notification
+      std::unique_lock<std::mutex> lock(kinova_init_mutex);
+      kinovas_init_ready = true;
+    }
     kinova_init_cv.notify_all();
     for (auto &th : kinova_init_threads) {
       th.join();
@@ -178,7 +183,9 @@ void run(void *data) {
   }
 
   delete control_data->kinovas;
+  delete control_data->kinova_threads;
   delete controller_ptr;
+  delete control_data;
 }
 
 } // namespace mc_kortex
