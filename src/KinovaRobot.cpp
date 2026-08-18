@@ -284,7 +284,8 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_actuator_count = m_base->GetActuatorCount().count();
   gripper_idx = 0;
   if (gripper_enabled) {
-    gripper_idx = m_actuator_count + 1;
+    // The gripper is appended right after the actuators in the sensor vectors
+    gripper_idx = m_actuator_count;
   }
   mc_rtc::log::info("[mc_kortex] {} robot has {} actuators", m_name,
                     m_actuator_count + (gripper_enabled ? 1 : 0));
@@ -1220,6 +1221,7 @@ void KinovaRobot::moveToInitPosition() {
     // Execute action
     try {
       mc_rtc::log::info("[mc_kortex] Moving the arm to initial position");
+      m_base->ExecuteWaypointTrajectory(wpts);
     } catch (k_api::KDetailedException &ex) {
       mc_rtc::log::error("[mc_kortex] Error when trying to execute trajectory "
                          "to reach initial position");
