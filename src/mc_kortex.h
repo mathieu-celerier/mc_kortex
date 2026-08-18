@@ -1,4 +1,4 @@
-#include "KinovaControlLoop.h"
+#include "KinovaRobot.h"
 #include <mc_control/mc_global_controller.h>
 
 namespace mc_kortex {

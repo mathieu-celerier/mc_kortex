@@ -27,13 +27,32 @@ if(UNIX
   set(KORTEX_API_URL
       "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86_64_gcc_5.4.zip"
   )
-  file(DOWNLOAD "${KORTEX_API_URL}"
-       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
-  file(ARCHIVE_EXTRACT INPUT
-       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip" DESTINATION
-       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
   set(KORTEX_ROOT_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
+  # Only download once: this runs at configure time, re-fetching the archive on
+  # every configure also breaks the build when offline
+  if(NOT EXISTS "${KORTEX_ROOT_DIR}/include")
+    message(STATUS "Downloading the Kortex API ${KORTEX_API_VERSION}")
+    file(
+      DOWNLOAD "${KORTEX_API_URL}"
+      "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip"
+      SHOW_PROGRESS
+      INACTIVITY_TIMEOUT 60
+      TLS_VERIFY ON
+      STATUS KORTEX_API_DOWNLOAD_STATUS)
+    list(GET KORTEX_API_DOWNLOAD_STATUS 0 KORTEX_API_DOWNLOAD_CODE)
+    if(NOT KORTEX_API_DOWNLOAD_CODE EQUAL 0)
+      list(GET KORTEX_API_DOWNLOAD_STATUS 1 KORTEX_API_DOWNLOAD_MESSAGE)
+      file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip")
+      message(
+        FATAL_ERROR
+          "Failed to download the Kortex API from ${KORTEX_API_URL}: ${KORTEX_API_DOWNLOAD_MESSAGE}"
+      )
+    endif()
+    file(ARCHIVE_EXTRACT INPUT
+         "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/kortex_api.zip" DESTINATION
+         "${KORTEX_ROOT_DIR}")
+  endif()
 else()
   if(NOT DEFINED KORTEX_ROOT_DIR)
     message(
@@ -45,11 +64,12 @@ endif()
 
 # Load kortex_api
 link_libraries(${KORTEX_ROOT_DIR}/lib/release/libKortexApiCpp.a)
-include_directories(${KORTEX_ROOT_DIR}/include)
-include_directories(${KORTEX_ROOT_DIR}/include/client)
-include_directories(${KORTEX_ROOT_DIR}/include/common)
-include_directories(${KORTEX_ROOT_DIR}/include/messages)
-include_directories(${KORTEX_ROOT_DIR}/include/client_stubs)
+# SYSTEM: the Kortex and bundled protobuf headers are not warning clean
+include_directories(SYSTEM ${KORTEX_ROOT_DIR}/include)
+include_directories(SYSTEM ${KORTEX_ROOT_DIR}/include/client)
+include_directories(SYSTEM ${KORTEX_ROOT_DIR}/include/common)
+include_directories(SYSTEM ${KORTEX_ROOT_DIR}/include/messages)
+include_directories(SYSTEM ${KORTEX_ROOT_DIR}/include/client_stubs)
 
 # link other libs
 if(UNIX)
