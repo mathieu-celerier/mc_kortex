@@ -1,5 +1,6 @@
 #include "KinovaRobot.h"
 #include <Eigen/src/Core/Matrix.h>
+#include <cmath>
 #include <mc_rtc/DataStore.h>
 
 namespace mc_kinova {
@@ -402,9 +403,35 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   }
 
   addGui(gc);
+  createDatastoreEntries(gc);
 
   mc_rtc::log::success("[mc_kortex] Connected succesfuly to robot at {}:{}",
                        m_ip_address, m_port);
+}
+
+void KinovaRobot::createDatastoreEntries(mc_control::MCGlobalController &gc) {
+  gc.controller().datastore().make_call(
+      "mc_kortex::setLambda", [this](const std::vector<double> &l) {
+        if (l.size() != static_cast<size_t>(m_actuator_count)) {
+          mc_rtc::log::error("[mc_kortex] setLambda expects {} values, got {}",
+                             m_actuator_count, l.size());
+          return;
+        }
+        m_lambda = l;
+      });
+  gc.controller().datastore().make_call(
+      "mc_kortex::setVelThreshold",
+      [this](double th) { m_friction_vel_threshold = std::abs(th); });
+  gc.controller().datastore().make_call(
+      "mc_kortex::setAccThreshold",
+      [this](double th) { m_friction_accel_threshold = std::abs(th); });
+}
+
+void KinovaRobot::removeDatastoreEntries(mc_control::MCGlobalController &gc) {
+  auto &ds = gc.controller().datastore();
+  ds.remove("mc_kortex::setLambda");
+  ds.remove("mc_kortex::setVelThreshold");
+  ds.remove("mc_kortex::setAccThreshold");
 }
 
 void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
@@ -1093,6 +1120,7 @@ void KinovaRobot::controlThread(mc_control::MCGlobalController &controller,
     }
 
     removeLogEntry(controller);
+    removeDatastoreEntries(controller);
 
     mc_rtc::log::warning("[MC_KORTEX] {} control loop killed", m_name);
 

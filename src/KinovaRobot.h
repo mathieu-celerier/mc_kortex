@@ -139,6 +139,8 @@ public:
   void init(mc_control::MCGlobalController &gc,
             mc_rtc::Configuration
                 &kortexConfig); // Initialize connection to the robot
+  void createDatastoreEntries(mc_control::MCGlobalController &gc);
+  void removeDatastoreEntries(mc_control::MCGlobalController &gc);
   void addLogEntry(mc_control::MCGlobalController &gc);
   void removeLogEntry(mc_control::MCGlobalController &gc);
 
@@ -150,7 +152,7 @@ public:
   void updateControl(mc_control::MCGlobalController &controller);
 
   void torqueFrictionComputation(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local, 
+                                 k_api::BaseCyclic::Feedback m_state_local,
                                  double joint_idx);
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
                                  k_api::BaseCyclic::Feedback m_state_local,
