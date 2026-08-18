@@ -1,6 +1,7 @@
 #include "KinovaRobot.h"
 #include <Eigen/src/Core/Matrix.h>
 #include <cmath>
+#include <fmt/ranges.h>
 #include <mc_rtc/DataStore.h>
 
 namespace mc_kinova {
@@ -34,15 +35,23 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
 }
 
 KinovaRobot::~KinovaRobot() {
+  // Every handle below is only created by init(), which may never have run or
+  // may have thrown halfway through
   // Close API session
-  m_session_manager->CloseSession();
-  m_session_manager_real_time->CloseSession();
+  if (m_session_manager)
+    m_session_manager->CloseSession();
+  if (m_session_manager_real_time)
+    m_session_manager_real_time->CloseSession();
 
   // Deactivate the router and cleanly disconnect from the transport object
-  m_router->SetActivationStatus(false);
-  m_transport->disconnect();
-  m_router_real_time->SetActivationStatus(false);
-  m_transport_real_time->disconnect();
+  if (m_router)
+    m_router->SetActivationStatus(false);
+  if (m_transport)
+    m_transport->disconnect();
+  if (m_router_real_time)
+    m_router_real_time->SetActivationStatus(false);
+  if (m_transport_real_time)
+    m_transport_real_time->disconnect();
 
   // Destroy the API
   delete m_actuator_config;
@@ -364,21 +373,22 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
 
   // Custom torque control init
   if (kortexConfig.has("torque_control")) {
-    kortexConfig = kortexConfig("torque_control");
-    if (!kortexConfig.has("mode"))
+    // Local copy: kortexConfig is shared by every robot of the configuration
+    auto torqueConfig = kortexConfig("torque_control");
+    if (!torqueConfig.has("mode"))
       mc_rtc::log::error_and_throw<std::runtime_error>(
           "[mc_kortex] For {} robot, \"torque_control\" key found in config "
           "file but \"mode\" key is missing.",
           m_name);
 
-    std::string controle_mode = kortexConfig("mode");
+    std::string controle_mode = torqueConfig("mode");
     if (controle_mode.compare("feedforward") == 0) {
       m_torque_control_type = mc_kinova::TorqueControlType::Feedforward;
       mc_rtc::log::info(
           "[mc_kortex] Using feedforward only for torque control");
     } else if (controle_mode.compare("custom") == 0) {
       m_torque_control_type = mc_kinova::TorqueControlType::Custom;
-      setCustomTorque(kortexConfig);
+      setCustomTorque(torqueConfig);
       mc_rtc::log::info("[mc_kortex] Using custom control for torque control");
     } else {
       m_torque_control_type = mc_kinova::TorqueControlType::Default;
@@ -900,66 +910,39 @@ std::string KinovaRobot::controlLoopParamToString(
     k_api::ActuatorConfig::LoopSelection &loop_selected, int actuator_idx) {
   k_api::ActuatorConfig::ControlLoopParameters parameters =
       m_actuator_config->GetControlLoopParameters(loop_selected, actuator_idx);
-  std::ostringstream ss;
-  ss << "kAz = [";
-  for (size_t i = 0; i < parameters.kaz_size() - 1; i++)
-    ss << parameters.kaz(i) << ",";
-  ss << parameters.kaz(parameters.kaz_size()) << "] kBz = [";
-  for (size_t i = 0; i < parameters.kbz_size() - 1; i++)
-    ss << parameters.kbz(i) << ",";
-  ss << parameters.kbz(parameters.kbz_size()) << "]";
-
-  return ss.str();
+  return fmt::format(
+      "kAz = [{}] kBz = [{}]",
+      fmt::join(parameters.kaz().begin(), parameters.kaz().end(), ","),
+      fmt::join(parameters.kbz().begin(), parameters.kbz().end(), ","));
 }
 
 void KinovaRobot::checkBaseFaultBanks(uint32_t fault_bank_a,
                                       uint32_t fault_bank_b) {
   if (fault_bank_a != 0) {
-    auto error_list = getBaseFaultList(fault_bank_a);
-    std::ostringstream ss;
-    ss << "[";
-    std::copy(error_list.begin(), error_list.end() - 1,
-              std::ostream_iterator<std::string>(ss, ", "));
-    ss << error_list.back() << "]";
-    mc_rtc::log::error_and_throw("[MC_KORTEX] Error in base fault bank A : {}",
-                                 ss.str());
+    mc_rtc::log::error_and_throw(
+        "[MC_KORTEX] Error in base fault bank A : [{}]",
+        fmt::join(getBaseFaultList(fault_bank_a), ", "));
   }
   if (fault_bank_b != 0) {
-    auto error_list = getBaseFaultList(fault_bank_b);
-    std::ostringstream ss;
-    ss << "[";
-    std::copy(error_list.begin(), error_list.end() - 1,
-              std::ostream_iterator<std::string>(ss, ", "));
-    ss << error_list.back() << "]";
-    mc_rtc::log::error_and_throw("[MC_KORTEX] Error in base fault bank B : {}",
-                                 ss.str());
+    mc_rtc::log::error_and_throw(
+        "[MC_KORTEX] Error in base fault bank B : [{}]",
+        fmt::join(getBaseFaultList(fault_bank_b), ", "));
   }
 }
 
 void KinovaRobot::checkActuatorsFaultBanks(
     k_api::BaseCyclic::Feedback feedback) {
   for (size_t i = 0; i < m_actuator_count; i++) {
-    if (feedback.mutable_actuators(i)->fault_bank_a() != 0) {
-      auto error_list =
-          getActuatorFaultList(feedback.mutable_actuators(i)->fault_bank_a());
-      std::ostringstream ss;
-      ss << "[";
-      std::copy(error_list.begin(), error_list.end() - 1,
-                std::ostream_iterator<std::string>(ss, ", "));
-      ss << error_list.back() << "]";
+    const auto &actuator = feedback.actuators(i);
+    if (actuator.fault_bank_a() != 0) {
       mc_rtc::log::error_and_throw(
-          "[MC_KORTEX] Error in base fault bank A : {}", ss.str());
+          "[MC_KORTEX] Error in actuator {} fault bank A : [{}]", i + 1,
+          fmt::join(getActuatorFaultList(actuator.fault_bank_a()), ", "));
     }
-    if (feedback.mutable_actuators(i)->fault_bank_b() != 0) {
-      auto error_list =
-          getActuatorFaultList(feedback.mutable_actuators(i)->fault_bank_b());
-      std::ostringstream ss;
-      ss << "[";
-      std::copy(error_list.begin(), error_list.end() - 1,
-                std::ostream_iterator<std::string>(ss, ", "));
-      ss << error_list.back() << "]";
+    if (actuator.fault_bank_b() != 0) {
       mc_rtc::log::error_and_throw(
-          "[MC_KORTEX] Error in base fault bank B : {}", ss.str());
+          "[MC_KORTEX] Error in actuator {} fault bank B : [{}]", i + 1,
+          fmt::join(getActuatorFaultList(actuator.fault_bank_b()), ", "));
     }
   }
 }
@@ -1298,14 +1281,8 @@ void KinovaRobot::printJointActiveControlLoop(int joint_id) {
       k_api::ActuatorConfig::ControlLoopSelection::MOTOR_VELOCITY)
     active_loops.push_back("MOTOR_VELOCITY");
 
-  std::ostringstream ss;
-  ss << "[";
-  std::copy(active_loops.begin(), active_loops.end() - 1,
-            std::ostream_iterator<std::string>(ss, ", "));
-  ss << active_loops.back() << "]";
-
-  mc_rtc::log::info("[mc_kortex][Joint {}] Active control loops: {}", joint_id,
-                    ss.str());
+  mc_rtc::log::info("[mc_kortex][Joint {}] Active control loops: [{}]",
+                    joint_id, fmt::join(active_loops, ", "));
 }
 
 // ============================== Private methods ==============================
@@ -1361,7 +1338,7 @@ void KinovaRobot::addGui(mc_control::MCGlobalController &gc) {
         {"Kortex", m_name, "Transfer function"},
         mc_rtc::gui::NumberInput(
             "Lambda", [this]() { return m_lambda[0]; },
-            [this](const double v) { m_lambda.assign(v, m_actuator_count); }));
+            [this](const double v) { m_lambda.assign(m_actuator_count, v); }));
 
     gc.controller().gui()->addElement(
         {"Kortex", m_name, "Integral term"},
@@ -1524,12 +1501,8 @@ KinovaRobot::create_event_listener_by_promise(
   };
 }
 
-std::string printVec(std::vector<double> vec) {
-  std::ostringstream s;
-  s << "[";
-  std::copy(vec.begin(), vec.end() - 1, std::ostream_iterator<double>(s, ", "));
-  s << vec.back() << "]";
-  return s.str();
+std::string printVec(const std::vector<double> &vec) {
+  return fmt::format("[{}]", fmt::join(vec, ", "));
 }
 
 } // namespace mc_kinova

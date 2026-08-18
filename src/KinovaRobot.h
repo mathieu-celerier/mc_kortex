@@ -205,6 +205,6 @@ private:
 
 using KinovaRobotPtr = std::unique_ptr<KinovaRobot>;
 
-std::string printVec(std::vector<double> vec);
+std::string printVec(const std::vector<double> &vec);
 
 } // namespace mc_kinova
