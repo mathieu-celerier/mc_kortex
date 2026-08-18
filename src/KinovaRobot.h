@@ -146,19 +146,19 @@ public:
 
   void updateState();
   void updateState(bool &running);
-  void updateState(const k_api::BaseCyclic::Feedback data);
+  void updateState(const k_api::BaseCyclic::Feedback &data);
   bool sendCommand(mc_rbdyn::Robot &robot, bool &running);
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
 
   void torqueFrictionComputation(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local,
-                                 double joint_idx);
+                                 const k_api::BaseCyclic::Feedback &state,
+                                 size_t joint_idx);
   double currentTorqueControlLaw(mc_rbdyn::Robot &robot,
-                                 k_api::BaseCyclic::Feedback m_state_local,
-                                 double joint_idx);
+                                 const k_api::BaseCyclic::Feedback &state,
+                                 size_t joint_idx);
   void checkBaseFaultBanks(uint32_t fault_bank_a, uint32_t fault_bank_b);
-  void checkActuatorsFaultBanks(k_api::BaseCyclic::Feedback feedback);
+  void checkActuatorsFaultBanks(const k_api::BaseCyclic::Feedback &feedback);
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
   std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
 

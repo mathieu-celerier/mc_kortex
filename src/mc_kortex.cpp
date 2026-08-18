@@ -2,6 +2,8 @@
 
 #include "KortexConfig.h"
 
+#include <ctime>
+
 namespace mc_kortex {
 
 void *global_thread_init(
@@ -130,7 +132,18 @@ void run(void *data) {
   while (controller.running) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     now = ts.tv_sec * 1e6 + ts.tv_nsec * 1e-3;
-    if (now - last > controller.timestep() * 1e6) {
+    if (now - last <= controller.timestep() * 1e6) {
+      // Wait for the next deadline instead of spinning on the clock: this is
+      // not the real-time loop, the per robot control threads are
+      double deadline_us = last + controller.timestep() * 1e6;
+      timespec deadline;
+      deadline.tv_sec = static_cast<time_t>(deadline_us / 1e6);
+      deadline.tv_nsec =
+          static_cast<long>((deadline_us - deadline.tv_sec * 1e6) * 1e3);
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+      continue;
+    }
+    {
       // mc_rtc::log::info("[mc_kortex] Control loop elapsed time {}ms",
       // (now-last)*1e-3);
       for (auto &kinova : kinovas) {
