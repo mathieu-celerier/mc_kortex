@@ -1255,6 +1255,7 @@ void KinovaRobot::moveToInitPosition() {
     // Execute action
     try {
       mc_rtc::log::info("[mc_kortex] Moving the arm to initial position");
+      m_base->ExecuteWaypointTrajectory(wpts);
     } catch (k_api::KDetailedException &ex) {
       mc_rtc::log::error("[mc_kortex] Error when trying to execute trajectory "
                          "to reach initial position");
