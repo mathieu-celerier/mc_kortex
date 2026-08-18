@@ -108,86 +108,70 @@ void KinovaRobot::setSingleServoingMode() {
 }
 
 void KinovaRobot::setCustomTorque(mc_rtc::Configuration &torque_config) {
+  // Reads a per actuator vector, falling back on the default when the key is
+  // absent and refusing a vector that does not match the actuator count
+  auto loadVector = [this](const mc_rtc::Configuration &config,
+                           const std::string &key, std::vector<double> values) {
+    if (config.has(key)) {
+      values = config(key);
+      if (values.size() != static_cast<size_t>(m_actuator_count))
+        mc_rtc::log::error_and_throw<std::runtime_error>(
+            "[MC_KORTEX] for {} robot, value for \"{}\" key has {} elements "
+            "but the robot has {} actuators",
+            m_name, key, values.size(), m_actuator_count);
+    }
+    return values;
+  };
+
+  const std::vector<double> default_stiction = {3.0,  3.0,  3.0, 3.0,
+                                                1.25, 1.25, 1.25};
+  const std::vector<double> default_coulomb = {3.0,  3.0,  3.0, 3.0,
+                                               1.25, 1.25, 1.25};
+  const std::vector<double> default_viscous = {2.416, 2.416, 2.416, 2.416,
+                                               1.1,   1.1,   1.1};
+
   if (torque_config.has("friction_compensation")) {
-    if (torque_config("friction_compensation").has("stiction")) {
-      m_stiction_values = torque_config("friction_compensation")("stiction");
-      if (not(m_stiction_values.size() ==
-              static_cast<size_t>(m_actuator_count)))
-        mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
-            "does not match actuators count.\nActuators count = ",
-            m_name, m_actuator_count);
-    } else {
-      m_stiction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
-    }
-    if (torque_config("friction_compensation").has("coulomb")) {
-      m_friction_values = torque_config("friction_compensation")("coulomb");
-      if (not(m_friction_values.size() ==
-              static_cast<size_t>(m_actuator_count)))
-        mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
-            "does not match actuators count.\nActuators count = ",
-            m_name, m_actuator_count);
-    } else {
-      m_friction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
-    }
-    if (torque_config("friction_compensation").has("viscous")) {
-      m_viscous_values = torque_config("friction_compensation")("viscous");
-      if (not(m_viscous_values.size() == static_cast<size_t>(m_actuator_count)))
-        mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[MC_KORTEX] for {} robot, value for \"compensation_values\" key "
-            "does not match actuators count.\nActuators count = ",
-            m_name, m_actuator_count);
-    } else {
-      m_viscous_values = {2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1};
-    }
-
-    if (torque_config("friction_compensation").has("velocity_threshold")) {
-      m_friction_vel_threshold =
-          torque_config("friction_compensation")("velocity_threshold");
-    } else {
-      m_friction_vel_threshold = 0.01;
-    }
-
-    if (torque_config("friction_compensation").has("acceleration_threshold")) {
-      m_friction_accel_threshold =
-          torque_config("friction_compensation")("acceleration_threshold");
-    } else {
-      m_friction_accel_threshold = 100;
-    }
-
-    if (torque_config.has("lambda")) {
-      m_lambda = torque_config("lambda");
-    } else {
-      m_lambda = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
-    }
+    auto friction_config = torque_config("friction_compensation");
+    m_stiction_values =
+        loadVector(friction_config, "stiction", default_stiction);
+    m_friction_values = loadVector(friction_config, "coulomb", default_coulomb);
+    m_viscous_values = loadVector(friction_config, "viscous", default_viscous);
+    m_friction_vel_threshold = friction_config("velocity_threshold", 0.01);
+    m_friction_accel_threshold =
+        friction_config("acceleration_threshold", 100.0);
   } else {
+    m_stiction_values = default_stiction;
+    m_friction_values = default_coulomb;
+    m_viscous_values = default_viscous;
     m_friction_vel_threshold = 0.01;
-    m_friction_accel_threshold = 100;
-    m_friction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
-    m_viscous_values = {2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1};
+    m_friction_accel_threshold = 100.0;
   }
 
-  if (torque_config.has("integral_term")) {
-    if (torque_config("integral_term").has("theta")) {
-      m_integral_slow_theta = torque_config("integral_term")("theta");
-    } else {
-      m_integral_slow_theta = 0.1;
-    }
+  // lambda belongs to torque_control, not to friction_compensation
+  m_lambda = loadVector(torque_config, "lambda",
+                        std::vector<double>(m_actuator_count, 1.0));
 
-    if (torque_config("integral_term").has("gain")) {
-      m_integral_slow_gain = torque_config("integral_term")("gain");
-    } else {
-      m_integral_slow_gain = 1e-3;
-    }
-  } else {
-    m_integral_slow_theta = 0.1;
-    m_integral_slow_gain = 1e-3;
+  m_integral_slow_theta = 0.1;
+  m_integral_slow_gain = 1e-3;
+  if (torque_config.has("integral_term")) {
+    auto integral_config = torque_config("integral_term");
+    // Fill in place: leaves the default untouched when the key is absent
+    integral_config("theta", m_integral_slow_theta);
+    integral_config("gain", m_integral_slow_gain);
   }
 
   mc_rtc::log::info(
-      "[mc_kortex] {} robot is using custom torque control with parameters:",
-      m_name);
+      "[mc_kortex] {} robot is using custom torque control with parameters:\n"
+      "  stiction = [{}]\n"
+      "  coulomb = [{}]\n"
+      "  viscous = [{}]\n"
+      "  velocity threshold = {}, acceleration threshold = {}\n"
+      "  lambda = [{}]\n"
+      "  integral theta = {}, integral gain = {}",
+      m_name, fmt::join(m_stiction_values, ", "),
+      fmt::join(m_friction_values, ", "), fmt::join(m_viscous_values, ", "),
+      m_friction_vel_threshold, m_friction_accel_threshold,
+      fmt::join(m_lambda, ", "), m_integral_slow_theta, m_integral_slow_gain);
 }
 
 void KinovaRobot::setControlMode(std::string mode) {
