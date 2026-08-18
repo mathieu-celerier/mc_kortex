@@ -566,18 +566,18 @@ void KinovaRobot::updateState(bool &running) {
       });
 }
 
-void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback data) {
+void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback &data) {
   std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
   m_state = data;
 }
 
 void KinovaRobot::torqueFrictionComputation(
-    mc_rbdyn::Robot &robot, k_api::BaseCyclic::Feedback m_state_local,
-    double joint_idx) {
+    mc_rbdyn::Robot &robot, const k_api::BaseCyclic::Feedback &state,
+    size_t joint_idx) {
   auto rjo = robot.refJointOrder();
 
-  double velocity = mc_rtc::constants::toRad(
-      m_state_local.mutable_actuators(joint_idx)->velocity());
+  double velocity =
+      mc_rtc::constants::toRad(state.actuators(joint_idx).velocity());
   double friction_torque = 0.0;
   auto qdd_r = m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
 
@@ -600,18 +600,19 @@ void KinovaRobot::torqueFrictionComputation(
 
 double
 KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
-                                     k_api::BaseCyclic::Feedback m_state_local,
-                                     double joint_idx) {
+                                     const k_api::BaseCyclic::Feedback &state,
+                                     size_t joint_idx) {
 
   auto rjo = robot.refJointOrder();
 
-  double velocity = mc_rtc::constants::toRad(
-      m_state_local.mutable_actuators(joint_idx)->velocity());
-  double torque_measured = m_state_local.mutable_actuators(joint_idx)->torque();
+  double velocity =
+      mc_rtc::constants::toRad(state.actuators(joint_idx).velocity());
+  double torque_measured = state.actuators(joint_idx).torque();
 
   double torque_constant = (joint_idx > 3) ? 0.076 : 0.11;
-  auto filter_input = m_filter_input_buffer[joint_idx];
-  auto filter_output = m_filter_output_buffer[joint_idx];
+  // References: both buffers are read before being pushed to below
+  const auto &filter_input = m_filter_input_buffer[joint_idx];
+  const auto &filter_output = m_filter_output_buffer[joint_idx];
   double friction_torque = 0.0;
 
   auto qdd_r = m_command.alphaD[robot.jointIndexByName(rjo[joint_idx])][0];
@@ -931,7 +932,7 @@ void KinovaRobot::checkBaseFaultBanks(uint32_t fault_bank_a,
 }
 
 void KinovaRobot::checkActuatorsFaultBanks(
-    k_api::BaseCyclic::Feedback feedback) {
+    const k_api::BaseCyclic::Feedback &feedback) {
   for (size_t i = 0; i < m_actuator_count; i++) {
     const auto &actuator = feedback.actuators(i);
     if (actuator.fault_bank_a() != 0) {
@@ -1097,6 +1098,8 @@ void KinovaRobot::controlThread(mc_control::MCGlobalController &controller,
 
     while (not stop_controller) {
       now = GetTickUs();
+      // Deliberate spin: this is the real-time thread, it must hit its
+      // 1kHz deadline and must not be descheduled by a sleep
       if (now - last < 1000)
         continue;
       dt = now - last;
