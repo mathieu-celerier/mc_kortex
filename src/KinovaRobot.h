@@ -50,8 +50,6 @@ private:
 
   int64_t m_dt;
 
-  double t_plot;
-
   int m_control_id;
   int m_prev_control_id;
   std::mutex m_update_control_mutex;
@@ -122,7 +120,8 @@ private:
 
 public:
   KinovaRobot(const std::string &name, const std::string &ip_address,
-              const std::string &username, const std::string &password);
+              const std::string &username = "admin",
+              const std::string &password = "admin");
   ~KinovaRobot();
 
   // ============================== Getter ============================== //
@@ -183,9 +182,6 @@ private:
 
   void addGui(mc_control::MCGlobalController &gc);
   void removeGui(mc_control::MCGlobalController &gc);
-
-  void addPlot(mc_control::MCGlobalController &gc);
-  void removePlot(mc_control::MCGlobalController &gc);
 
   double jointPoseToRad(int joint_idx, double deg);
   double radToJointPose(int joint_idx, double rad);
