@@ -16,13 +16,15 @@ struct ConnectionParameters {
 
 /** Configuration of one robot
  *
- * The "default" section of the Kortex configuration holds the settings shared
- * by every robot; a section named after the robot overrides them, recursively,
- * key by key. Pass an empty name to read the defaults alone.
+ * The shared settings are everything the Kortex section holds outside of the
+ * robot sections, the "default" section included and merged last; a section
+ * named after the robot overrides them, recursively, key by key. Pass an empty
+ * name to read the shared settings alone.
  *
  * Configurations written before the "default" section existed, which put the
- * settings directly at the Kortex level, are still read that way: when there
- * is no "default" section the Kortex section itself provides the defaults.
+ * settings directly at the Kortex level, are read exactly as they were, and
+ * the two layouts may be mixed: a "default" section holding the connection
+ * parameters next to settings left at the Kortex level.
  */
 mc_rtc::Configuration
 robotConfiguration(const mc_rtc::Configuration &kortexConfig,

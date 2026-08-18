@@ -22,16 +22,28 @@ bool readConnectionParameters(const mc_rtc::Configuration &config,
   return defined;
 }
 
-/** The section of a Kortex configuration holding the shared settings */
+/** The settings a Kortex configuration shares between every robot
+ *
+ * Everything the Kortex section holds is a shared setting, except the robot
+ * sections and the "default" section itself, which is merged on top: a
+ * configuration may hold both, as one written before "default" existed does
+ * when it gains a "default" section for the connection parameters alone.
+ */
 mc_rtc::Configuration
-defaultSection(const mc_rtc::Configuration &kortexConfig) {
+defaultSettings(const mc_rtc::Configuration &kortexConfig) {
+  mc_rtc::Configuration config;
+  config.load(kortexConfig);
+  config.remove(DEFAULT_SECTION);
+  for (const auto &section : robotSections(kortexConfig)) {
+    config.remove(section);
+  }
+
   if (kortexConfig.has(DEFAULT_SECTION) &&
       kortexConfig(DEFAULT_SECTION).isObject()) {
-    return kortexConfig(DEFAULT_SECTION);
+    config.load(kortexConfig(DEFAULT_SECTION));
   }
-  // Legacy layout: the settings sit directly at the Kortex level. The robot
-  // sections it also holds are simply ignored by whoever reads the result.
-  return kortexConfig;
+
+  return config;
 }
 
 } // namespace
@@ -42,7 +54,7 @@ robotConfiguration(const mc_rtc::Configuration &kortexConfig,
   // load() merges recursively into a fresh object, leaving the configuration
   // it reads from untouched: every robot gets its own copy of the defaults
   mc_rtc::Configuration config;
-  config.load(defaultSection(kortexConfig));
+  config.load(defaultSettings(kortexConfig));
 
   if (!name.empty() && kortexConfig.has(name) &&
       kortexConfig(name).isObject()) {

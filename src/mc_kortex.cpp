@@ -24,17 +24,16 @@ void *global_thread_init(
     controller.realRobots().robotCopy(robots.robot(i), robots.robot(i).name());
   }
 
-  // A Kortex level section that is neither the defaults nor a robot of the
-  // controller configures nothing: most likely a typo or a setting left at
-  // the Kortex level when the configuration moved to a "default" section
-  for (const auto &key : kortexConfig.keys()) {
-    if (key == "default" || !kortexConfig(key).isObject() ||
-        robots.hasRobot(key)) {
+  // A section that names an arm to reach, yet no robot of the controller:
+  // most likely a misspelled robot name. Every other Kortex level section is
+  // a shared setting and configures all of them.
+  for (const auto &name : mc_kinova::robotSections(kortexConfig)) {
+    if (robots.hasRobot(name)) {
       continue;
     }
     mc_rtc::log::warning("[mc_kortex] Ignoring the \"{}\" section: no robot of "
                          "the controller goes by that name",
-                         key);
+                         name);
   }
 
   // Initialize controlled kinova robot
@@ -65,15 +64,17 @@ void *global_thread_init(
       mc_rtc::log::info("[mc_kortex] {} robot will connect to {}", robot.name(),
                         params.ip_address);
       kinova_configs[robot.name()] = robotConfig;
-      kinova_init_threads.emplace_back([&, params]() {
+      // The name is copied: the threads run once the loop, and with it the
+      // robot binding, is gone
+      kinova_init_threads.emplace_back([&, name = robot.name(), params]() {
         {
           std::unique_lock<std::mutex> lock(kinova_init_mutex);
           kinova_init_cv.wait(
               lock, [&kinovas_init_ready]() { return kinovas_init_ready; });
         }
-        auto kinova = std::unique_ptr<mc_kinova::KinovaRobot>(
-            new mc_kinova::KinovaRobot(robot.name(), params.ip_address,
-                                       params.username, params.password));
+        auto kinova =
+            std::unique_ptr<mc_kinova::KinovaRobot>(new mc_kinova::KinovaRobot(
+                name, params.ip_address, params.username, params.password));
         std::unique_lock<std::mutex> lock(kinova_init_mutex);
         kinovas.emplace_back(std::move(kinova));
       });

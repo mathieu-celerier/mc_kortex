@@ -160,14 +160,16 @@ parameters and initial posture.
 
 `username` and `password` fall back to `admin` when neither level sets them.
 `ip` has none: a robot for which neither level provides an address is reported
-as not configured and left alone. A section that matches no robot of the
-controller configures nothing and is reported as such, which also catches a
-misspelled robot name.
+as not configured and left alone. A section that provides an address, yet
+matches no robot of the controller, configures nothing and is reported as such,
+which catches a misspelled robot name.
 
-Configurations written before `default` existed, with the settings directly
-under `Kortex` and the connection parameters repeated in each robot section,
-are read exactly as they used to be: without a `default` section, the `Kortex`
-section itself provides the defaults.
+A setting left directly under `Kortex` is shared too: everything the `Kortex`
+section holds outside of the robot sections is a default, and `default` is
+merged on top of it. Configurations written before `default` existed, with the
+settings directly under `Kortex` and the connection parameters repeated in each
+robot section, are read exactly as they used to be, and the two layouts may be
+mixed freely.
 
 ---
 
@@ -264,4 +266,3 @@ This repository provides a ready-to-run environment showcasing multiple control 
 [Kinova Kortex API]: https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L
 [mc-rtc-superbuild]: https://github.com/mc-rtc/mc-rtc-superbuild/
 [industry-ready-phri/mc-rtc-superbuild]: https://github.com/industry-ready-phri/mc-rtc-superbuild
-

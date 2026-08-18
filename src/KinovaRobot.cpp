@@ -320,10 +320,19 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     m_init_posture.resize(m_actuator_count);
 
     auto joints_feedback = m_base->GetMeasuredJointAngles();
-    for (size_t i = 0; i < m_actuator_count; i++) {
-      auto joint_feedback = joints_feedback.joint_angles(i);
-      m_init_posture[joint_feedback.joint_identifier() - 1] =
-          joint_feedback.value();
+    for (size_t i = 0; i < static_cast<size_t>(m_actuator_count); i++) {
+      const auto &joint_feedback = joints_feedback.joint_angles(i);
+      // The identifier is zero based, as everywhere the feedback is read
+      auto joint_idx = joint_feedback.joint_identifier();
+      if (joint_idx >= static_cast<uint32_t>(m_actuator_count)) {
+        mc_rtc::log::error_and_throw<std::runtime_error>(
+            "[mc_kortex] for {} robot, the measured joint angles report joint "
+            "{} while the robot has {} actuators",
+            m_name, joint_idx, m_actuator_count);
+      }
+      // The feedback is in degrees, m_init_posture is in radians
+      m_init_posture[joint_idx] =
+          jointPoseToRad(joint_idx, joint_feedback.value());
     }
   }
 
@@ -339,10 +348,6 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
     m_gripper_motor_command->set_force(100.0);
   }
 
-  // Initialize state
-  updateState();
-  updateSensors(gc);
-
   // Velocity filtering init
   m_use_filtered_velocities = kortexConfig.has("filter_velocity");
   if (m_use_filtered_velocities) {
@@ -352,6 +357,10 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
         m_velocity_filter_ratio);
   }
   m_filtered_velocities.assign(m_actuator_count, 0.0);
+
+  // Initialize state
+  updateState();
+  updateSensors(gc);
 
   // Custom torque control init
   if (kortexConfig.has("torque_control")) {
