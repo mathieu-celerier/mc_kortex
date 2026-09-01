@@ -1214,6 +1214,26 @@ void KinovaRobot::moveToInitPosition() {
     ang->add_angles(jointPoses.at(0).at(i));
   }
 
+  // A single-waypoint AngularWaypoint left at its default duration of 0 is
+  // rejected by the validation/execution as "unfeasible": with only one
+  // waypoint the firmware cannot infer an optimal duration on its own, so we
+  // must provide one. Size it conservatively from the largest joint move
+  // required, using a slow speed and a floor so short moves still get enough
+  // time.
+  constexpr double kConservativeDegPerSec = 20.0;
+  constexpr float kMinDurationSec = 5.0f;
+  auto joints_feedback = m_base->GetMeasuredJointAngles();
+  double max_delta_deg = 0.0;
+  for (int i = 0; i < m_actuator_count; i++) {
+    double current_deg = joints_feedback.joint_angles(i).value();
+    double delta = std::fabs(jointPoses.at(0).at(i) - current_deg);
+    delta = std::min(delta, 360.0 - delta);
+    max_delta_deg = std::max(max_delta_deg, delta);
+  }
+  ang->set_duration(
+      std::max(kMinDurationSec,
+               static_cast<float>(max_delta_deg / kConservativeDegPerSec)));
+
   // Connect to notification action topic
   std::promise<k_api::Base::ActionEvent> finish_promise_cart;
   auto finish_future_cart = finish_promise_cart.get_future();
