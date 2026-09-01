@@ -73,6 +73,7 @@ private:
   // ===== Gripper properties =====
   bool gripper_enabled;
   size_t gripper_idx;
+  std::string m_gripper_name;
   k_api::GripperCyclic::MotorCommand *m_gripper_motor_command;
   float gripper_position;
   float gripper_velocity;

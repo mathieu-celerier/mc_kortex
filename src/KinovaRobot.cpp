@@ -23,10 +23,6 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
   m_device_manager = nullptr;
   m_actuator_config = nullptr;
   gripper_enabled = false;
-  if (m_name.find("gripper") != std::string::npos) {
-    mc_rtc::log::info("[mc_kortex] Gripper enabled for robot: {}", m_name);
-    gripper_enabled = true;
-  }
   m_state = k_api::BaseCyclic::Feedback();
   m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
   m_control_mode_id = 0;
@@ -282,12 +278,53 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   // Read actuators count
   setSingleServoingMode();
   m_actuator_count = m_base->GetActuatorCount().count();
+
+  // Whether this robot has a gripper, and how many joints it adds to the
+  // sensor vectors, is a property of the loaded robot model, not of the
+  // robot's name: query mc_rtc instead of guessing from m_name.
+  auto &robot = gc.robots().robot(m_name);
+  const auto &grippers = robot.grippersByName();
+  gripper_enabled = !grippers.empty();
   gripper_idx = 0;
   if (gripper_enabled) {
-    gripper_idx = m_actuator_count + 1;
+    if (grippers.size() > 1) {
+      mc_rtc::log::error_and_throw<std::runtime_error>(
+          "[mc_kortex] {} robot has {} grippers, mc_kortex only supports one",
+          m_name, grippers.size());
+    }
+    m_gripper_name = grippers.begin()->first;
+    const auto &gripper = *grippers.begin()->second;
+    if (gripper.activeJoints().size() != 1) {
+      mc_rtc::log::error_and_throw<std::runtime_error>(
+          "[mc_kortex] {} robot's gripper \"{}\" has {} actuated joints, "
+          "mc_kortex only supports a single actuated gripper joint",
+          m_name, m_gripper_name, gripper.activeJoints().size());
+    }
+    // The gripper is appended right after the actuators in the sensor vectors
+    gripper_idx = m_actuator_count;
+    mc_rtc::log::info("[mc_kortex] Gripper \"{}\" enabled for robot: {}",
+                      m_gripper_name, m_name);
   }
   mc_rtc::log::info("[mc_kortex] {} robot has {} actuators", m_name,
                     m_actuator_count + (gripper_enabled ? 1 : 0));
+
+  // Catch an interface/model mismatch here, with a clear message, instead of
+  // letting it surface as MCGlobalController::initEncoders' domain_error deep
+  // inside mc_rtc's init()
+  size_t total_provided =
+      static_cast<size_t>(m_actuator_count) + (gripper_enabled ? 1 : 0);
+  if (total_provided != robot.refJointOrder().size()) {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[mc_kortex] {} robot: the arm reports {} actuators{}, but the loaded "
+        "robot model expects {} joints in refJointOrder(). Check that the "
+        "MainRobot module matches the physical arm (with or without its "
+        "gripper).",
+        m_name, m_actuator_count,
+        gripper_enabled
+            ? fmt::format(" + 1 gripper joint (\"{}\")", m_gripper_name)
+            : "",
+        robot.refJointOrder().size());
+  }
 
   m_filter_command.assign(m_actuator_count, 0.0);
   m_filter_command_w_gain.assign(m_actuator_count, 0.0);
@@ -416,9 +453,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
       [this](double g) { m_integral_slow_gain = g; });
 
   // Initialize Jacobian object
-  auto robot = &gc.robots().robot(m_name);
-
-  Eigen::VectorXd tu = rbd::paramToVector(robot->mb(), robot->tu());
+  Eigen::VectorXd tu = rbd::paramToVector(robot.mb(), robot.tu());
   // Initialize each actuator to its current position
   for (int i = 0; i < m_actuator_count; i++) {
     m_integral_slow_bound[i] = 0.05 * tu[i]; // 5% of torque limit
@@ -767,7 +802,7 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   }
 
   if (gripper_enabled) {
-    float gripper_target = robot.gripper("gripper").q()[0] * 100.0;
+    float gripper_target = robot.gripper(m_gripper_name).q()[0] * 100.0;
     float gripper_velocity_target =
         fabs(gripper_target - gripper_position) * 2.2; //*0.001;
     if (gripper_velocity_target > 100.0)
