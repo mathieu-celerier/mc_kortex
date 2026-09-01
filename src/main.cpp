@@ -33,7 +33,9 @@ int main(int argc, char *argv[]) {
         ("diagnostic-low-level-duration", po::value<double>()->default_value(1.0), "Strain gauge sampling window, in seconds (a sample count over a nominal 100Hz, the real rate is closer to 6Hz)")
         ("diagnostic-dump", po::value<std::string>()->default_value(""), "Write every strain gauge sample to this CSV file")
         ("diagnostic-reset-servoing", po::bool_switch(), "Put the arm back in single level servoing and exit, for when a diagnostic was interrupted")
-        ("robot", po::value<std::string>()->default_value(""), "Restrict the diagnostic to a single robot of the Kortex configuration");
+        ("robot", po::value<std::string>()->default_value(""), "Restrict the diagnostic to a single robot of the Kortex configuration")
+        ("write-torque-calibration", po::value<std::string>()->default_value(""), "Write the torque calibration described by this JSON file to one actuator, then read it back and verify. The only mode that writes to the arm")
+        ("write-torque-calibration-force", po::bool_switch(), "Write the coefficients even if they fail the plausibility checks");
   // clang-format on
 
   po::variables_map vm;
@@ -56,7 +58,8 @@ int main(int argc, char *argv[]) {
   // The diagnostic talks to the arm directly: it must stay usable when the
   // controller itself cannot be started.
   if (vm["diagnostic"].as<bool>() ||
-      vm["diagnostic-reset-servoing"].as<bool>()) {
+      vm["diagnostic-reset-servoing"].as<bool>() ||
+      !vm["write-torque-calibration"].as<std::string>().empty()) {
     auto only_robot = vm["robot"].as<std::string>();
     int status = 0;
     size_t diagnosed = 0;
@@ -103,7 +106,12 @@ int main(int argc, char *argv[]) {
       opts.low_level_duration =
           vm["diagnostic-low-level-duration"].as<double>();
       opts.dump_path = vm["diagnostic-dump"].as<std::string>();
-      if (vm["diagnostic-reset-servoing"].as<bool>()) {
+      opts.write_calibration_path =
+          vm["write-torque-calibration"].as<std::string>();
+      opts.write_force = vm["write-torque-calibration-force"].as<bool>();
+      if (!opts.write_calibration_path.empty()) {
+        status = std::max(status, mc_kinova::writeTorqueCalibration(opts));
+      } else if (vm["diagnostic-reset-servoing"].as<bool>()) {
         status = std::max(status, mc_kinova::resetServoingMode(opts));
       } else {
         status = std::max(status, mc_kinova::runDiagnostic(opts));

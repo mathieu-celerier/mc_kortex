@@ -1,5 +1,6 @@
 #include "KinovaDiagnostic.h"
 
+#include <mc_rtc/Configuration.h>
 #include <mc_rtc/logging.h>
 
 #include <ActuatorConfigClientRpc.h>
@@ -193,6 +194,47 @@ uint32_t customDataChannel(const k_api::ActuatorCyclic::CustomData &data,
   }
 }
 
+uint32_t customDataChannel(const k_api::BaseCyclic::ActuatorCustomData &data,
+                           int index) {
+  switch (index) {
+  case 0:
+    return data.custom_data_0();
+  case 1:
+    return data.custom_data_1();
+  case 2:
+    return data.custom_data_2();
+  case 3:
+    return data.custom_data_3();
+  case 4:
+    return data.custom_data_4();
+  case 5:
+    return data.custom_data_5();
+  case 6:
+    return data.custom_data_6();
+  case 7:
+    return data.custom_data_7();
+  default:
+    return 0;
+  }
+}
+
+/** Copy one actuator's four raw counts and four converted values out of a
+ * custom data message, whichever service produced it, into the running
+ * statistics and the dump row */
+template <typename CustomDataT>
+void recordGauges(const CustomDataT &data, ActuatorReport &report,
+                  std::array<double, 2 * STRAIN_GAUGE_COUNT> &row) {
+  for (int g = 0; g < STRAIN_GAUGE_COUNT; ++g) {
+    double raw = static_cast<double>(wordToInt32(customDataChannel(data, g)));
+    double value = wordToFloat(customDataChannel(data, g + STRAIN_GAUGE_COUNT));
+    report.gauge_raw[static_cast<size_t>(g)].add(static_cast<float>(raw));
+    report.gauge_value[static_cast<size_t>(g)].add(static_cast<float>(value));
+    row[static_cast<size_t>(g)] = raw;
+    row[static_cast<size_t>(g + STRAIN_GAUGE_COUNT)] = value;
+  }
+  report.has_strain_gauges = true;
+}
+
 /** Check that the arm answers on its TCP port before handing over to Kortex
  *
  * The Kortex transport blocks for minutes on an unreachable arm, which is a
@@ -265,8 +307,7 @@ public:
 
     device_manager_ = new k_api::DeviceManager::DeviceManagerClient(router_);
     device_config_ = new k_api::DeviceConfig::DeviceConfigClient(router_);
-    actuator_config_ =
-        new k_api::ActuatorConfig::ActuatorConfigClient(router_);
+    actuator_config_ = new k_api::ActuatorConfig::ActuatorConfigClient(router_);
     base_ = new k_api::Base::BaseClient(router_);
     base_cyclic_ = new k_api::BaseCyclic::BaseCyclicClient(router_rt_);
     actuator_cyclic_ =
@@ -275,6 +316,8 @@ public:
     // router or the other, so keep both and pick whichever replies
     actuator_cyclic_tcp_ =
         new k_api::ActuatorCyclic::ActuatorCyclicClient(router_);
+    // Same story for the whole arm custom data read
+    base_cyclic_tcp_ = new k_api::BaseCyclic::BaseCyclicClient(router_);
   }
 
   ~DiagnosticSession() {
@@ -293,6 +336,7 @@ public:
 
     delete actuator_cyclic_tcp_;
     delete actuator_cyclic_;
+    delete base_cyclic_tcp_;
     delete base_cyclic_;
     delete base_;
     delete actuator_config_;
@@ -311,6 +355,7 @@ public:
   k_api::ActuatorConfig::ActuatorConfigClient *actuator_config_ = nullptr;
   k_api::Base::BaseClient *base_ = nullptr;
   k_api::BaseCyclic::BaseCyclicClient *base_cyclic_ = nullptr;
+  k_api::BaseCyclic::BaseCyclicClient *base_cyclic_tcp_ = nullptr;
   k_api::ActuatorCyclic::ActuatorCyclicClient *actuator_cyclic_ = nullptr;
   k_api::ActuatorCyclic::ActuatorCyclicClient *actuator_cyclic_tcp_ = nullptr;
 
@@ -407,15 +452,15 @@ std::vector<ActuatorReport> discoverActuators(DiagnosticSession &session) {
           session.device_config_->GetFirmwareVersion(report.device_id)
               .firmware_version();
     } catch (const k_api::KDetailedException &ex) {
-      mc_rtc::log::warning("[mc_kortex] Could not read identity of device {}: {}",
-                           report.device_id, ex.what());
+      mc_rtc::log::warning(
+          "[mc_kortex] Could not read identity of device {}: {}",
+          report.device_id, ex.what());
     }
     ordered.emplace_back(handle.order(), report);
   }
-  std::sort(ordered.begin(), ordered.end(),
-            [](const auto &lhs, const auto &rhs) {
-              return lhs.first < rhs.first;
-            });
+  std::sort(
+      ordered.begin(), ordered.end(),
+      [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
   std::vector<ActuatorReport> reports;
   reports.reserve(ordered.size());
   for (auto &entry : ordered)
@@ -428,8 +473,8 @@ void sampleFeedback(DiagnosticSession &session,
                     std::vector<ActuatorReport> &reports, double duration) {
   size_t samples =
       std::max<size_t>(1, static_cast<size_t>(duration * SAMPLING_FREQUENCY));
-  auto period = std::chrono::microseconds(
-      static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
+  auto period =
+      std::chrono::microseconds(static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
   mc_rtc::log::info(
       "[mc_kortex] Sampling actuator feedback for {:.1f}s ({} samples), "
       "move the joints by hand to exercise the torque sensors",
@@ -507,16 +552,16 @@ void readCalibrationStatus(DiagnosticSession &session,
       element.set_calibration_item(item);
       std::string name = k_api::DeviceConfig::CalibrationItem_Name(item);
       try {
-        auto result =
-            session.device_config_->GetCalibrationResult(element,
-                                                         report.device_id);
+        auto result = session.device_config_->GetCalibrationResult(
+            element, report.device_id);
         report.calibration_status.emplace_back(
             name, k_api::DeviceConfig::CalibrationStatus_Name(
                       result.calibration_status()));
       } catch (const k_api::KDetailedException &ex) {
         // Not every firmware answers this RPC on actuators. Report it once
         // rather than failing loudly seven times over.
-        if (report.device_id == reports.front().device_id && item == items.front()) {
+        if (report.device_id == reports.front().device_id &&
+            item == items.front()) {
           mc_rtc::log::warning(
               "[mc_kortex] Calibration status is not available on this arm: {}",
               ex.what());
@@ -524,11 +569,9 @@ void readCalibrationStatus(DiagnosticSession &session,
         report.calibration_status.emplace_back(name, "UNAVAILABLE");
       }
     }
-    bool none_available =
-        std::all_of(report.calibration_status.begin(),
-                    report.calibration_status.end(), [](const auto &entry) {
-                      return entry.second == "UNAVAILABLE";
-                    });
+    bool none_available = std::all_of(
+        report.calibration_status.begin(), report.calibration_status.end(),
+        [](const auto &entry) { return entry.second == "UNAVAILABLE"; });
     if (report.device_id == reports.front().device_id && none_available) {
       // The RPC is unsupported arm-wide, no point querying the other actuators
       for (auto &other : reports) {
@@ -596,6 +639,10 @@ bool sampleStrainGauges(DiagnosticSession &session,
       CustomDataIndex::FLOAT_TORQUE_SENSOR_2,
       CustomDataIndex::FLOAT_TORQUE_SENSOR_3};
 
+  // A transient router timeout must cost one sample, not the whole capture,
+  // so a joint is only given up on after several consecutive failures
+  constexpr int MAX_CONSECUTIVE_FAILURES = 5;
+  std::vector<int> failures(reports.size(), 0);
   std::vector<k_api::ActuatorConfig::CustomDataSelection> previous(
       reports.size());
   std::vector<bool> restore(reports.size(), false);
@@ -628,15 +675,60 @@ bool sampleStrainGauges(DiagnosticSession &session,
 
   size_t samples =
       std::max<size_t>(1, static_cast<size_t>(duration * SAMPLING_FREQUENCY));
-  auto period = std::chrono::microseconds(
-      static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
+  auto period =
+      std::chrono::microseconds(static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
 
-  // Per sample dump: timestamp, every gauge of every actuator, and the torque
-  // each actuator reports at the same instant
+  // One BaseCyclic::RefreshCustomData returns the custom data of every
+  // actuator, so all four gauges of all seven joints come from a single
+  // instant, the way the control loop takes its feedback. The per actuator
+  // ActuatorCyclic path below costs one round trip each and staggered the
+  // joints by up to ~175ms: invisible on a stationary arm, and larger than the
+  // signal as soon as the load moves.
+  k_api::BaseCyclic::BaseCyclicClient *arm_cyclic = nullptr;
+  k_api::BaseCyclic::CustomData custom_request;
+  std::string arm_cyclic_reason;
+  for (auto *candidate : {session.base_cyclic_, session.base_cyclic_tcp_}) {
+    if (candidate == nullptr)
+      continue;
+    try {
+      auto probe = candidate->RefreshCustomData(custom_request);
+      if (probe.actuators_custom_data_size() >=
+          static_cast<int>(reports.size())) {
+        arm_cyclic = candidate;
+        break;
+      }
+      arm_cyclic_reason =
+          fmt::format("answered with {} actuators, {} expected",
+                      probe.actuators_custom_data_size(), reports.size());
+    } catch (const k_api::KDetailedException &ex) {
+      arm_cyclic_reason = ex.what();
+    }
+  }
+  if (arm_cyclic == nullptr) {
+    // Not an error: BaseCyclic::RefreshCustomData answers only in low level
+    // servoing, which a read-only diagnostic must not enter. The per actuator
+    // path below then reads each actuator's own feedback right beside its own
+    // gauges, so every joint is internally consistent even though the joints
+    // in one row are staggered relative to each other. Each joint is fitted on
+    // its own, so that stagger does not matter; what mattered, and what this
+    // avoids, is a torque read up to seven round trips away from its gauges.
+    mc_rtc::log::info(
+        "[mc_kortex] Whole arm custom data unavailable ({}), reading each "
+        "actuator's gauges and feedback together instead",
+        arm_cyclic_reason);
+  }
+
+  // Per sample dump: the timestamp of each of the two reads, every gauge of
+  // every actuator, and the torque and position each actuator reports
   std::ofstream dump;
   if (!dump_path.empty()) {
     dump.open(dump_path);
-    dump << "t";
+    // epoch is the wall clock at the start of the row: the only column that
+    // can be lined up with a stream recorded outside this process, such as the
+    // force torque sensor
+    dump << "t;epoch;t_custom;t_feedback";
+    for (size_t i = 0; i < reports.size(); ++i)
+      dump << fmt::format(";j{}_t", i + 1);
     for (size_t i = 0; i < reports.size(); ++i) {
       for (int g = 0; g < STRAIN_GAUGE_COUNT; ++g)
         dump << fmt::format(";j{}_gauge{}_raw", i + 1, g);
@@ -645,63 +737,110 @@ bool sampleStrainGauges(DiagnosticSession &session,
     }
     for (size_t i = 0; i < reports.size(); ++i)
       dump << fmt::format(";j{}_torque", i + 1);
+    for (size_t i = 0; i < reports.size(); ++i)
+      dump << fmt::format(";j{}_position", i + 1);
     dump << "\n";
   }
   auto start = std::chrono::steady_clock::now();
+  auto elapsed = [&start]() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         start)
+        .count();
+  };
 
   for (size_t s = 0; s < samples; ++s) {
     std::vector<std::array<double, 2 * STRAIN_GAUGE_COUNT>> row(reports.size());
     for (auto &entry : row)
       entry.fill(std::nan(""));
+    double t_custom = std::nan("");
+    std::vector<double> torque(reports.size(), std::nan(""));
+    std::vector<double> position(reports.size(), std::nan(""));
+    std::vector<double> t_joint(reports.size(), std::nan(""));
 
-    for (size_t i = 0; i < reports.size(); ++i) {
-      if (!selected[i])
-        continue;
-      auto &report = reports[i];
+    if (arm_cyclic != nullptr) {
       try {
-        auto data = cyclic->RefreshCustomData(message_id, report.device_id);
-        for (int g = 0; g < STRAIN_GAUGE_COUNT; ++g) {
-          double raw =
-              static_cast<double>(wordToInt32(customDataChannel(data, g)));
-          double value =
-              wordToFloat(customDataChannel(data, g + STRAIN_GAUGE_COUNT));
-          report.gauge_raw[static_cast<size_t>(g)].add(
-              static_cast<float>(raw));
-          report.gauge_value[static_cast<size_t>(g)].add(
-              static_cast<float>(value));
-          row[i][static_cast<size_t>(g)] = raw;
-          row[i][static_cast<size_t>(g + STRAIN_GAUGE_COUNT)] = value;
+        auto data = arm_cyclic->RefreshCustomData(custom_request);
+        t_custom = elapsed();
+        int count = std::min<int>(data.actuators_custom_data_size(),
+                                  static_cast<int>(reports.size()));
+        for (int i = 0; i < count; ++i) {
+          if (!selected[static_cast<size_t>(i)])
+            continue;
+          recordGauges(data.actuators_custom_data(i),
+                       reports[static_cast<size_t>(i)],
+                       row[static_cast<size_t>(i)]);
+          t_joint[static_cast<size_t>(i)] = t_custom;
         }
-        report.has_strain_gauges = true;
-      } catch (const k_api::KDetailedException &ex) {
+      } catch (const std::exception &ex) {
         if (s == 0) {
           mc_rtc::log::warning(
-              "[mc_kortex] Could not read strain gauge data on device {}: {}",
-              report.device_id, ex.what());
+              "[mc_kortex] Could not read the whole arm custom data: {}",
+              ex.what());
         }
-        selected[i] = false;
       }
+    } else {
+      for (size_t i = 0; i < reports.size(); ++i) {
+        if (!selected[i])
+          continue;
+        auto &report = reports[i];
+        try {
+          auto data = cyclic->RefreshCustomData(message_id, report.device_id);
+          t_joint[i] = elapsed();
+          recordGauges(data, report, row[i]);
+          // Immediately next to the gauges of this same actuator, so the pair
+          // is consistent no matter how fast the load is changing
+          auto fb = cyclic->RefreshFeedback(message_id, report.device_id);
+          torque[i] = fb.torque();
+          position[i] = fb.position();
+          failures[i] = 0;
+        } catch (const std::exception &ex) {
+          if (failures[i] == 0) {
+            mc_rtc::log::warning(
+                "[mc_kortex] Could not read strain gauge data on device {}: {}",
+                report.device_id, ex.what());
+          }
+          if (++failures[i] >= MAX_CONSECUTIVE_FAILURES) {
+            mc_rtc::log::warning(
+                "[mc_kortex] Giving up on device {} after {} consecutive "
+                "failures",
+                report.device_id, failures[i]);
+            selected[i] = false;
+          }
+        }
+      }
+      t_custom = elapsed();
     }
 
     if (dump.is_open()) {
-      double t = std::chrono::duration<double>(
-                     std::chrono::steady_clock::now() - start)
-                     .count();
-      dump << fmt::format("{:.4f}", t);
+      double t_feedback = std::nan("");
+      if (arm_cyclic != nullptr) {
+        try {
+          auto feedback = session.base_cyclic_->RefreshFeedback();
+          t_feedback = elapsed();
+          int count = std::min<int>(feedback.actuators_size(),
+                                    static_cast<int>(reports.size()));
+          for (int i = 0; i < count; ++i) {
+            torque[static_cast<size_t>(i)] = feedback.actuators(i).torque();
+            position[static_cast<size_t>(i)] = feedback.actuators(i).position();
+          }
+        } catch (const std::exception &) {
+        }
+      }
+      double epoch = std::chrono::duration<double>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+      dump << fmt::format("{:.4f};{:.6f};{:.4f};{:.4f}", elapsed(), epoch,
+                          t_custom, t_feedback);
+      for (double v : t_joint)
+        dump << ";" << fmt::format("{:.4f}", v);
       for (const auto &entry : row) {
         for (double v : entry)
           dump << ";" << fmt::format("{:.6f}", v);
       }
-      try {
-        auto feedback = session.base_cyclic_->RefreshFeedback();
-        int count = std::min<int>(feedback.actuators_size(),
-                                  static_cast<int>(reports.size()));
-        for (int i = 0; i < count; ++i)
-          dump << ";" << fmt::format("{:.6f}", feedback.actuators(i).torque());
-      } catch (const k_api::KDetailedException &) {
-        for (size_t i = 0; i < reports.size(); ++i)
-          dump << ";nan";
-      }
+      for (double v : torque)
+        dump << ";" << fmt::format("{:.6f}", v);
+      for (double v : position)
+        dump << ";" << fmt::format("{:.6f}", v);
       dump << "\n";
     }
 
@@ -727,8 +866,9 @@ bool sampleStrainGauges(DiagnosticSession &session,
     }
   }
 
-  return std::any_of(reports.begin(), reports.end(),
-                     [](const ActuatorReport &r) { return r.has_strain_gauges; });
+  return std::any_of(
+      reports.begin(), reports.end(),
+      [](const ActuatorReport &r) { return r.has_strain_gauges; });
 }
 
 /** Base client of the guard currently holding low level servoing, if any
@@ -745,8 +885,8 @@ void restoreServoingOnSignal(int signum) {
   if (base != nullptr) {
     try {
       auto mode = k_api::Base::ServoingModeInformation();
-      mode.set_servoing_mode(static_cast<k_api::Base::ServoingMode>(
-          g_low_level_previous.load()));
+      mode.set_servoing_mode(
+          static_cast<k_api::Base::ServoingMode>(g_low_level_previous.load()));
       base->SetServoingMode(mode);
     } catch (...) {
       // Nothing useful to do from a signal handler, the message below is the
@@ -810,8 +950,8 @@ void reportNewFaults(DiagnosticSession &session,
                      const std::vector<ActuatorReport> &before) {
   try {
     auto feedback = session.base_cyclic_->RefreshFeedback();
-    int count =
-        std::min<int>(feedback.actuators_size(), static_cast<int>(before.size()));
+    int count = std::min<int>(feedback.actuators_size(),
+                              static_cast<int>(before.size()));
     for (int i = 0; i < count; ++i) {
       uint32_t bank_a = feedback.actuators(i).fault_bank_a();
       uint32_t raised = bank_a & ~before[static_cast<size_t>(i)].fault_bank_a;
@@ -844,8 +984,8 @@ void detectAnomalies(std::vector<ActuatorReport> &reports) {
     }
 
     if (report.fault_bank_a != 0) {
-      report.anomalies.push_back(
-          fmt::format("fault bank A is set: {}", decodeBankA(report.fault_bank_a)));
+      report.anomalies.push_back(fmt::format("fault bank A is set: {}",
+                                             decodeBankA(report.fault_bank_a)));
     }
     if (report.fault_bank_b != 0) {
       report.anomalies.push_back(
@@ -884,16 +1024,13 @@ void detectAnomalies(std::vector<ActuatorReport> &reports) {
       }
       // Live gauges behind a dead converted value settle the question: the
       // sensor works and only its calibration is missing
-      bool gauges_alive =
-          std::all_of(report.gauge_raw.begin(), report.gauge_raw.end(),
-                      [](const SignalStats &s) {
-                        return s.distinct.size() > 1;
-                      });
+      bool gauges_alive = std::all_of(
+          report.gauge_raw.begin(), report.gauge_raw.end(),
+          [](const SignalStats &s) { return s.distinct.size() > 1; });
       bool values_dead =
           std::all_of(report.gauge_value.begin(), report.gauge_value.end(),
                       [](const SignalStats &s) {
-                        return s.distinct.size() == 1 &&
-                               std::abs(s.min) < 1e-9;
+                        return s.distinct.size() == 1 && std::abs(s.min) < 1e-9;
                       });
       if (gauges_alive && values_dead) {
         report.anomalies.push_back(
@@ -957,13 +1094,16 @@ void printReport(const ArmIdentity &arm,
                         i + 1, offset);
       continue;
     }
-    mc_rtc::log::info("joint_{}: torque offset {} | global gain {:.6f} | "
-                      "global offset {:.6f}",
+    // The coefficients are single precision and span several decades, so they
+    // are printed with the 9 significant digits that round-trip a float: they
+    // are meant to be compared between arms and archived, and {:.6f} turns
+    // every gauge gain into "0.000016".
+    mc_rtc::log::info("joint_{}: torque offset {} | global gain {:.9g} | "
+                      "global offset {:.9g}",
                       i + 1, offset, r.global_gain, r.global_offset);
     for (size_t g = 0; g < r.gauge_gain.size(); ++g) {
-      double gauge_offset =
-          g < r.gauge_offset.size() ? r.gauge_offset[g] : 0.0;
-      mc_rtc::log::info("         gauge {}: gain {:.6f} offset {:.6f}", g,
+      double gauge_offset = g < r.gauge_offset.size() ? r.gauge_offset[g] : 0.0;
+      mc_rtc::log::info("         gauge {}: gain {:.9g} offset {:.9g}", g,
                         r.gauge_gain[g], gauge_offset);
     }
   }
@@ -1025,6 +1165,201 @@ int resetServoingMode(const DiagnosticOptions &opts) {
   return 0;
 }
 
+/** Plausibility of a calibration about to be written
+ *
+ * A least squares fit of the gauge gains can be statistically excellent and
+ * physically impossible: on both arms measured here the four gains of one
+ * actuator span at most a factor 1.26, while an ill conditioned fit happily
+ * returns spans of 15 and negative gains. These bounds are deliberately loose,
+ * they only catch results that cannot describe a real sensor.
+ */
+bool calibrationIsPlausible(const std::vector<double> &gain,
+                            const std::vector<double> &offset,
+                            double global_gain, double global_offset) {
+  bool ok = true;
+  auto complain = [&ok](const std::string &why) {
+    mc_rtc::log::error("[mc_kortex] Implausible calibration: {}", why);
+    ok = false;
+  };
+  for (size_t g = 0; g < gain.size(); ++g) {
+    if (!(gain[g] > 0.0))
+      complain(fmt::format("gauge {} gain is {}, it must be strictly positive",
+                           g, gain[g]));
+  }
+  if (ok) {
+    auto mm = std::minmax_element(gain.begin(), gain.end());
+    double span = *mm.second / *mm.first;
+    if (span > 2.0)
+      complain(fmt::format(
+          "the four gains span a factor {:.2f}; no real actuator measured here "
+          "exceeds 1.26, so this is a fit artefact rather than a sensor",
+          span));
+  }
+  for (size_t g = 0; g < offset.size(); ++g) {
+    if (std::abs(offset[g]) > 200.0)
+      complain(fmt::format("gauge {} offset is {:.1f} N.m, far outside the "
+                           "-42 to +59 seen on real actuators",
+                           g, offset[g]));
+  }
+  if (global_gain < 0.5 || global_gain > 2.0)
+    complain(fmt::format(
+        "global gain is {}, it is a trim and should sit near 1", global_gain));
+  if (std::abs(global_offset) > 10.0)
+    complain(fmt::format("global offset is {}, it is a trim and should sit "
+                         "near 0",
+                         global_offset));
+  return ok;
+}
+
+int writeTorqueCalibration(const DiagnosticOptions &opts) {
+  mc_rtc::log::info("[mc_kortex] Writing a torque calibration to {} at {}",
+                    opts.name, opts.ip_address);
+
+  // Everything that can be checked without the arm is checked first, so a bad
+  // file never reaches a session
+  int joint = 0;
+  std::vector<double> gain, offset;
+  double global_gain = 1.0;
+  double global_offset = 0.0;
+  try {
+    mc_rtc::Configuration cfg(opts.write_calibration_path);
+    joint = cfg("joint", 0);
+    gain = cfg("gain", std::vector<double>{});
+    offset = cfg("offset", std::vector<double>{});
+    global_gain = cfg("globalGain", 1.0);
+    global_offset = cfg("globalOffset", 0.0);
+  } catch (const std::exception &ex) {
+    mc_rtc::log::error("[mc_kortex] Could not read {}: {}",
+                       opts.write_calibration_path, ex.what());
+    return 2;
+  }
+  if (joint < 1) {
+    mc_rtc::log::error("[mc_kortex] {} does not name a joint: add a 1 based "
+                       "\"joint\" entry",
+                       opts.write_calibration_path);
+    return 2;
+  }
+  if (gain.size() != STRAIN_GAUGE_COUNT ||
+      offset.size() != STRAIN_GAUGE_COUNT) {
+    mc_rtc::log::error("[mc_kortex] Expected {} gains and {} offsets, got {} "
+                       "and {}",
+                       STRAIN_GAUGE_COUNT, STRAIN_GAUGE_COUNT, gain.size(),
+                       offset.size());
+    return 2;
+  }
+  if (!calibrationIsPlausible(gain, offset, global_gain, global_offset)) {
+    if (!opts.write_force) {
+      mc_rtc::log::error("[mc_kortex] Refusing to write, pass "
+                         "--write-torque-calibration-force to override");
+      return 2;
+    }
+    mc_rtc::log::warning("[mc_kortex] Writing implausible coefficients anyway, "
+                         "--write-torque-calibration-force was given");
+  }
+
+  if (!isReachable(opts.ip_address, 10000, 2.0)) {
+    mc_rtc::log::error("[mc_kortex] {} does not answer on port 10000",
+                       opts.ip_address);
+    return 2;
+  }
+
+  try {
+    DiagnosticSession session(opts);
+    auto reports = discoverActuators(session);
+    if (static_cast<size_t>(joint) > reports.size()) {
+      mc_rtc::log::error("[mc_kortex] The arm has {} actuators, joint {} was "
+                         "asked for",
+                         reports.size(), joint);
+      return 2;
+    }
+    auto device_id = reports[static_cast<size_t>(joint) - 1].device_id;
+
+    auto before = session.actuator_config_->ReadTorqueCalibration(device_id);
+    mc_rtc::log::info(
+        "[mc_kortex] joint_{} (device {}) currently holds:", joint, device_id);
+    mc_rtc::log::info("           global gain {:.9g} | global offset {:.9g}",
+                      before.global_gain(), before.global_offset());
+    for (int g = 0; g < before.gain_size(); ++g)
+      mc_rtc::log::info("           gauge {}: gain {:.9g} offset {:.9g}", g,
+                        before.gain(g),
+                        g < before.offset_size() ? before.offset(g) : 0.0f);
+
+    // Always leave a way back before changing anything
+    std::string backup_path = opts.write_calibration_path +
+                              fmt::format(".joint{}.before.json", joint);
+    {
+      mc_rtc::Configuration backup;
+      backup.add("joint", joint);
+      std::vector<double> bg, bo;
+      for (int g = 0; g < before.gain_size(); ++g)
+        bg.push_back(before.gain(g));
+      for (int g = 0; g < before.offset_size(); ++g)
+        bo.push_back(before.offset(g));
+      backup.add("gain", bg);
+      backup.add("offset", bo);
+      backup.add("globalGain", static_cast<double>(before.global_gain()));
+      backup.add("globalOffset", static_cast<double>(before.global_offset()));
+      backup.save(backup_path);
+      mc_rtc::log::success("[mc_kortex] Previous calibration saved to {}",
+                           backup_path);
+    }
+
+    k_api::ActuatorConfig::TorqueCalibration wanted;
+    wanted.set_global_gain(static_cast<float>(global_gain));
+    wanted.set_global_offset(static_cast<float>(global_offset));
+    for (size_t g = 0; g < gain.size(); ++g)
+      wanted.add_gain(static_cast<float>(gain[g]));
+    for (size_t g = 0; g < offset.size(); ++g)
+      wanted.add_offset(static_cast<float>(offset[g]));
+
+    session.actuator_config_->WriteTorqueCalibration(wanted, device_id);
+    mc_rtc::log::info("[mc_kortex] Write accepted, reading it back");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    auto after = session.actuator_config_->ReadTorqueCalibration(device_id);
+    bool match = true;
+    auto same = [&match](const char *what, float expected, float got) {
+      bool ok = expected == got;
+      match = match && ok;
+      mc_rtc::log::info("           {:<18} wrote {:.9g} read {:.9g} {}", what,
+                        expected, got, ok ? "ok" : "MISMATCH");
+    };
+    mc_rtc::log::info("[mc_kortex] Verification:");
+    same("global gain", static_cast<float>(global_gain), after.global_gain());
+    same("global offset", static_cast<float>(global_offset),
+         after.global_offset());
+    for (size_t g = 0; g < gain.size(); ++g)
+      same(fmt::format("gauge {} gain", g).c_str(), static_cast<float>(gain[g]),
+           g < static_cast<size_t>(after.gain_size())
+               ? after.gain(static_cast<int>(g))
+               : 0.0f);
+    for (size_t g = 0; g < offset.size(); ++g)
+      same(fmt::format("gauge {} offset", g).c_str(),
+           static_cast<float>(offset[g]),
+           g < static_cast<size_t>(after.offset_size())
+               ? after.offset(static_cast<int>(g))
+               : 0.0f);
+
+    if (!match) {
+      mc_rtc::log::error("[mc_kortex] The arm did not keep what was written; "
+                         "restore with {}",
+                         backup_path);
+      return 1;
+    }
+    mc_rtc::log::success("[mc_kortex] joint_{} torque calibration written and "
+                         "verified",
+                         joint);
+    mc_rtc::log::info("[mc_kortex] Power cycle the arm to confirm it persists, "
+                      "then re-run the torque sensor offset removal so this "
+                      "joint is zeroed like the others");
+    return 0;
+  } catch (const std::exception &ex) {
+    mc_rtc::log::error("[mc_kortex] Writing the torque calibration failed: {}",
+                       ex.what());
+    return 2;
+  }
+}
+
 int runDiagnostic(const DiagnosticOptions &opts) {
   mc_rtc::log::info("[mc_kortex] Running diagnostic on {} at {}", opts.name,
                     opts.ip_address);
@@ -1063,9 +1398,8 @@ int runDiagnostic(const DiagnosticOptions &opts) {
     // The actuator cyclic service answers over the TCP router, so try reading
     // the gauges without touching the servoing mode first. Low level servoing
     // is only worth the risk if that genuinely fails.
-    bool gauges_read = sampleStrainGauges(session, reports,
-                                          opts.low_level_duration,
-                                          opts.dump_path);
+    bool gauges_read = sampleStrainGauges(
+        session, reports, opts.low_level_duration, opts.dump_path);
     if (!gauges_read) {
       if (opts.low_level) {
         mc_rtc::log::warning(
@@ -1076,9 +1410,8 @@ int runDiagnostic(const DiagnosticOptions &opts) {
         auto faults_before = reports;
         {
           LowLevelServoingGuard guard(session.base_, servoing_mode);
-          gauges_read = sampleStrainGauges(session, reports,
-                                           opts.low_level_duration,
-                                           opts.dump_path);
+          gauges_read = sampleStrainGauges(
+              session, reports, opts.low_level_duration, opts.dump_path);
         }
         reportNewFaults(session, faults_before);
       } else {
@@ -1123,10 +1456,9 @@ int runDiagnostic(const DiagnosticOptions &opts) {
   bool gauges_confirmed_alive =
       std::any_of(reports.begin(), reports.end(), [](const auto &r) {
         return r.has_strain_gauges && r.torque.distinct.size() == 1 &&
-               std::all_of(r.gauge_raw.begin(), r.gauge_raw.end(),
-                           [](const SignalStats &s) {
-                             return s.distinct.size() > 1;
-                           });
+               std::all_of(
+                   r.gauge_raw.begin(), r.gauge_raw.end(),
+                   [](const SignalStats &s) { return s.distinct.size() > 1; });
       });
   if (gauges_confirmed_alive) {
     mc_rtc::log::warning(

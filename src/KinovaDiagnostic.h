@@ -28,6 +28,13 @@ struct DiagnosticOptions {
    * instant. Use it to check that the gauges react to a load applied by hand.
    */
   std::string dump_path;
+  /** If set, the JSON file describing a torque calibration to write to one
+   * actuator. This is the only mode in which mc_kortex writes to the arm. */
+  std::string write_calibration_path;
+  /** Skip the plausibility checks on the coefficients about to be written.
+   * They exist because a fit can look statistically excellent and still be
+   * physically impossible, so they should only be bypassed deliberately. */
+  bool write_force = false;
 };
 
 /** Connect to a Kinova arm and print a hardware diagnostic report
@@ -55,5 +62,27 @@ int runDiagnostic(const DiagnosticOptions &opts);
  * before it could restore the servoing mode itself.
  */
 int resetServoingMode(const DiagnosticOptions &opts);
+
+/** Write a torque calibration to one actuator, then read it back and verify
+ *
+ * The only path in mc_kortex that writes to the arm. It is meant for restoring
+ * vendor supplied coefficients to an actuator whose calibration was lost, and
+ * for installing a provisional calibration while those are awaited.
+ *
+ * The JSON file must contain:
+ *   joint         1 based joint index
+ *   gain          four strain gauge gains
+ *   offset        four strain gauge offsets
+ *   globalGain    scalar trim, 1.0 if unknown
+ *   globalOffset  scalar trim, 0.0 if unknown
+ *
+ * Before writing, the current calibration of that actuator is read and saved
+ * next to the input file, so the previous state is always recoverable. The
+ * coefficients are then checked for plausibility unless write_force is set.
+ *
+ * Returns 0 if the write was verified, 1 if the read back does not match, 2 if
+ * the arm could not be reached or the file could not be used.
+ */
+int writeTorqueCalibration(const DiagnosticOptions &opts);
 
 } // namespace mc_kinova
