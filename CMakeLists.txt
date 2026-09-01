@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(KORTEX_API_VERSION 2.6.0)
+set(KORTEX_API_VERSION 2.8.0)
 
 project(
   ${PROJECT_NAME}
@@ -24,8 +24,14 @@ if(UNIX
    AND NOT APPLE
    AND NOT EMSCRIPTEN)
   add_definitions(-D_OS_UNIX)
+  # Kinova renamed the x86_64 archive to x86-64 in API 2.7.0
+  if(KORTEX_API_VERSION VERSION_LESS 2.7.0)
+    set(KORTEX_API_ARCHIVE "linux_x86_64_gcc_5.4.zip")
+  else()
+    set(KORTEX_API_ARCHIVE "linux_x86-64_gcc_5.4.zip")
+  endif()
   set(KORTEX_API_URL
-      "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/linux_x86_64_gcc_5.4.zip"
+      "https://artifactory.kinovaapps.com/artifactory/generic-public/kortex/API/${KORTEX_API_VERSION}/${KORTEX_API_ARCHIVE}"
   )
   set(KORTEX_ROOT_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/kortex_api/${KORTEX_API_VERSION}")
