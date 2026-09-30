@@ -8,6 +8,13 @@ Kortex:
     username: your_username
     password: your_password
 
+    # Cyclic exchange: how long into a tick its feedback is awaited (µs), when
+    # a reply is given up (ms), and how many consecutive ticks without any
+    # feedback stop the controller
+    feedback_wait_us: 600
+    refresh_timeout_ms: 3
+    max_missed_refresh: 20
+
     init_posture:
       on_startup: false
       posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]

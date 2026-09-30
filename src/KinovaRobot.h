@@ -4,6 +4,9 @@
 
 #include <boost/circular_buffer.hpp>
 
+#include <deque>
+#include <future>
+
 #include <ActuatorConfigClientRpc.h>
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
@@ -46,23 +49,64 @@ private:
   std::string m_name;
   int m_actuator_count;
 
-  bool stop_controller;
-
   int64_t m_dt;
 
-  int m_control_id;
-  int m_prev_control_id;
-  std::mutex m_update_control_mutex;
   rbd::MultiBodyConfig m_command;
   k_api::BaseCyclic::Command m_base_command;
+  // False until the controller produced a first command: until then only the
+  // feedback is requested
+  bool m_has_command;
 
-  std::mutex m_update_sensor_mutex;
   k_api::BaseCyclic::Feedback m_state;
+
+  // ===== Cyclic exchange =====
+  // A command leaves every tick, sendCommand(), and its feedback is awaited
+  // until a deadline within the tick, receiveFeedback(). A reply that misses
+  // the deadline stays queued and is used at a later tick, the controller
+  // meanwhile runs on the last feedback it got: the send rate never depends
+  // on the reply time
+  struct PendingExchange {
+    std::future<k_api::BaseCyclic::Feedback> feedback;
+    int64_t send_us;
+    int64_t tick;
+  };
+  std::deque<PendingExchange> m_pending;
+  int64_t m_tick;
+  // Tick whose exchange produced m_state
+  int64_t m_state_tick;
+  int64_t m_last_send_us;
+  // Time between sending a command and noticing its feedback
+  int64_t m_refresh_rtt_us;
+  // How many ticks old the feedback the controller runs on is: 0 when the
+  // feedback of this tick's exchange arrived before the deadline
+  int64_t m_feedback_age;
+  int64_t m_fresh_feedback;
+  int64_t m_late_feedback;
+  int64_t m_missed_refresh;
+  int m_consecutive_missed_refresh;
+  unsigned int m_refresh_timeout_ms;
+  int m_max_missed_refresh;
+  int m_feedback_wait_us;
+  // Frame identifier of the last command sent, incremented every command so
+  // the actuators can reject out of time frames
+  uint32_t m_frame_id;
+  // command_id reported by each actuator: not an echo of m_frame_id, a
+  // counter of the robot that advances at about 1 kHz of its own clock
+  std::vector<double> m_actuator_counter;
 
   k_api::Base::ServoingMode m_servoing_mode;
   k_api::ActuatorConfig::ControlMode m_control_mode;
   int m_control_mode_id;
   int m_prev_control_mode_id;
+  // Control mode change in progress, one request per actuator, see
+  // updateModeSwitch()
+  static constexpr unsigned int kModeSwitchTimeoutMs = 1000;
+  std::vector<std::future<void>> m_mode_switch;
+  int m_mode_switch_id;
+  k_api::ActuatorConfig::ControlMode m_mode_switch_mode;
+  int64_t m_mode_switch_start_us;
+  // Duration of the last control mode change
+  double m_mode_switch_ms;
 
   std::vector<double> m_init_posture;
 
@@ -150,11 +194,21 @@ public:
   void removeLogEntry(mc_control::MCGlobalController &gc);
 
   void updateState();
-  void updateState(bool &running);
-  void updateState(const k_api::BaseCyclic::Feedback &data);
-  bool sendCommand(mc_rbdyn::Robot &robot, bool &running);
+  // Control tick, in this order: sendCommand() then receiveFeedback() for
+  // every arm (the arms exchange in parallel), updateSensors(), the controller
+  // runs, updateControl() then buildCommand() for the next tick
+  void sendCommand();
+  // Waits for the feedback of this tick until deadline_us (GetTickUs() time)
+  void receiveFeedback(int64_t deadline_us, bool &running);
+  int64_t GetTickUs(void);
+  // How long into a tick to wait for its feedback (µs)
+  int feedbackWaitUs() const { return m_feedback_wait_us; }
   void updateSensors(mc_control::MCGlobalController &gc);
   void updateControl(mc_control::MCGlobalController &controller);
+  bool buildCommand(mc_rbdyn::Robot &robot, bool &running);
+  // Starts, or polls, the change of the actuators' control mode. False on
+  // failure
+  bool updateModeSwitch();
 
   void torqueFrictionComputation(mc_rbdyn::Robot &robot,
                                  const k_api::BaseCyclic::Feedback &state,
@@ -167,10 +221,9 @@ public:
   std::vector<std::string> getBaseFaultList(uint32_t fault_bank);
   std::vector<std::string> getActuatorFaultList(uint32_t fault_bank);
 
-  void controlThread(mc_control::MCGlobalController &controller,
-                     std::mutex &startM, std::condition_variable &startCV,
-                     bool &start, bool &running);
-  void stopController();
+  // Enter low level servoing before the first tick, leave it after the last
+  void startControl(mc_control::MCGlobalController &controller);
+  void stopControl(mc_control::MCGlobalController &controller);
   void moveToHomePosition(void);
   void moveToInitPosition(void);
 
@@ -197,7 +250,6 @@ private:
   computePostureTaskOffset(mc_rbdyn::Robot &robot,
                            mc_tasks::PostureTaskPtr posture_task);
   uint32_t jointIdFromCommandID(google::protobuf::uint32 cmd_id);
-  int64_t GetTickUs(void);
   void printError(const k_api::Error &err);
   void printException(k_api::KDetailedException &ex);
   std::function<void(k_api::Base::ActionNotification)>

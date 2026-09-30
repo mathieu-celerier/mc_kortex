@@ -117,6 +117,13 @@ Kortex:
     username: admin   # Default username (may differ on your setup)
     password: admin   # Default password
 
+    # Cyclic exchange: how long into a tick its feedback is awaited (µs), when
+    # a reply is given up (ms), and how many consecutive ticks without any
+    # feedback stop the controller
+    feedback_wait_us: 600
+    refresh_timeout_ms: 3
+    max_missed_refresh: 20
+
     init_posture:
       on_startup: false
       posture: [0.0, 0.4173, 3.1292, -2.1829, 0.0, 1.0342, 1.5226]
@@ -172,6 +179,34 @@ robot section, are read exactly as they used to be, and the two layouts may be
 mixed freely.
 
 ---
+
+### Control loop and latency logs
+
+A single thread runs each 1 kHz tick: every arm sends its command, at a fixed
+rate, then waits for its feedback until `feedback_wait_us` into the tick (the
+arms exchange in parallel). The controller runs on that feedback and the
+resulting command leaves at the next tick. A reply that misses the deadline is
+used at a later tick, the controller meanwhile runs on the last feedback it
+got, so the send rate never depends on the reply time. The following entries
+measure the exchange:
+
+| Log entry | Meaning |
+|---|---|
+| `kortex_LoopPerf` | Period between two commands sent (µs) |
+| `kortex_refresh_rtt_us` | Time from sending a command to getting its feedback (µs) |
+| `kortex_feedback_age` | Ticks since the command whose feedback the controller runs on (0: this tick's) |
+| `kortex_feedback_fresh` | Total ticks run on their own feedback |
+| `kortex_feedback_late` | Total ticks run on a late reply of an earlier tick |
+| `kortex_refresh_missed` | Total ticks with no new feedback at all |
+| `kortex_frame_id` | Frame identifier of the last command sent |
+| `kortex_actuator_counter` | `command_id` each actuator reports: a counter of the robot's own clock (about 1 kHz), not an echo of `kortex_frame_id` |
+| `perf_LoopOverruns` | Ticks skipped because the loop ran late |
+| `perf_Tick_*` | Duration of each phase of the previous tick (µs): `startDelay` (start after the scheduled time), `send`, `wait` (for the feedback), `waitOvershoot` (end of the wait after its deadline), `sensors`, `controller` (logging included), `build` (next command), `total` |
+| `kortex_mode_switch_pending` | A change of the actuators' control mode is in progress |
+| `kortex_mode_switch_ms` | Duration of the last control mode change (ms) |
+
+A control mode change (e.g. `Position` to `Torque`) sends one request per
+actuator, all at once, and the loop keeps running while the base applies them.
 
 ## Running Your Controller
 

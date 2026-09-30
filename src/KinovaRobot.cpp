@@ -11,8 +11,7 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
                          const std::string &username,
                          const std::string &password)
     : m_username(username), m_password(password), m_ip_address(ip_address),
-      m_port(10000), m_port_real_time(10001), m_name(name),
-      stop_controller(false) {
+      m_port(10000), m_port_real_time(10001), m_name(name) {
   m_router = nullptr;
   m_router_real_time = nullptr;
   m_transport = nullptr;
@@ -28,9 +27,25 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
   m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
   m_control_mode_id = 0;
   m_prev_control_mode_id = 0;
-  m_control_id = 0;
-  m_prev_control_id = 0;
   m_dt = 0;
+  m_has_command = false;
+  m_tick = 0;
+  m_state_tick = -1;
+  m_last_send_us = 0;
+  m_refresh_rtt_us = 0;
+  m_feedback_age = 0;
+  m_fresh_feedback = 0;
+  m_late_feedback = 0;
+  m_missed_refresh = 0;
+  m_consecutive_missed_refresh = 0;
+  m_refresh_timeout_ms = 3;
+  m_max_missed_refresh = 20;
+  m_feedback_wait_us = 600;
+  m_frame_id = 0;
+  m_mode_switch_id = 0;
+  m_mode_switch_mode = k_api::ActuatorConfig::ControlMode::POSITION;
+  m_mode_switch_start_us = 0;
+  m_mode_switch_ms = 0;
   m_torque_control_type = mc_kinova::TorqueControlType::Default;
 }
 
@@ -434,6 +449,17 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   }
   m_filtered_velocities.assign(m_actuator_count, 0.0);
 
+  // Cyclic exchange: how long into a tick its feedback is awaited, when the
+  // API gives up on a reply, and how many consecutive ticks without any
+  // feedback stop the controller
+  m_feedback_wait_us =
+      std::max(0, static_cast<int>(kortexConfig("feedback_wait_us", 600)));
+  m_refresh_timeout_ms = static_cast<unsigned int>(
+      std::max(1, static_cast<int>(kortexConfig("refresh_timeout_ms", 3))));
+  m_max_missed_refresh =
+      std::max(1, static_cast<int>(kortexConfig("max_missed_refresh", 20)));
+  m_actuator_counter.assign(m_actuator_count, 0.0);
+
   // Initialize state
   updateState();
   updateSensors(gc);
@@ -521,6 +547,25 @@ void KinovaRobot::removeDatastoreEntries(mc_control::MCGlobalController &gc) {
 void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
   gc.controller().logger().addLogEntry("kortex_LoopPerf",
                                        [&, this]() { return m_dt; });
+  gc.controller().logger().addLogEntry("kortex_refresh_rtt_us",
+                                       [this]() { return m_refresh_rtt_us; });
+  gc.controller().logger().addLogEntry("kortex_feedback_age",
+                                       [this]() { return m_feedback_age; });
+  gc.controller().logger().addLogEntry("kortex_feedback_fresh",
+                                       [this]() { return m_fresh_feedback; });
+  gc.controller().logger().addLogEntry("kortex_feedback_late",
+                                       [this]() { return m_late_feedback; });
+  gc.controller().logger().addLogEntry("kortex_refresh_missed",
+                                       [this]() { return m_missed_refresh; });
+  gc.controller().logger().addLogEntry(
+      "kortex_frame_id", [this]() { return static_cast<int64_t>(m_frame_id); });
+  gc.controller().logger().addLogEntry("kortex_actuator_counter",
+                                       [this]() { return m_actuator_counter; });
+  gc.controller().logger().addLogEntry("kortex_mode_switch_ms",
+                                       [this]() { return m_mode_switch_ms; });
+  gc.controller().logger().addLogEntry("kortex_mode_switch_pending", [this]() {
+    return !m_mode_switch.empty();
+  });
   if (m_torque_control_type == mc_kinova::TorqueControlType::Feedforward) {
     gc.controller().logger().addLogEntry(
         "kortex_commanded_current", [this]() { return m_current_command; });
@@ -586,7 +631,16 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
 }
 
 void KinovaRobot::removeLogEntry(mc_control::MCGlobalController &gc) {
-  gc.controller().logger().removeLogEntry("kortexLoopPerf");
+  gc.controller().logger().removeLogEntry("kortex_LoopPerf");
+  gc.controller().logger().removeLogEntry("kortex_refresh_rtt_us");
+  gc.controller().logger().removeLogEntry("kortex_feedback_age");
+  gc.controller().logger().removeLogEntry("kortex_feedback_fresh");
+  gc.controller().logger().removeLogEntry("kortex_feedback_late");
+  gc.controller().logger().removeLogEntry("kortex_refresh_missed");
+  gc.controller().logger().removeLogEntry("kortex_frame_id");
+  gc.controller().logger().removeLogEntry("kortex_actuator_counter");
+  gc.controller().logger().removeLogEntry("kortex_mode_switch_ms");
+  gc.controller().logger().removeLogEntry("kortex_mode_switch_pending");
   if (m_torque_control_type == mc_kinova::TorqueControlType::Custom) {
     gc.controller().logger().removeLogEntry(
         "kortex_friction_velocity_threshold");
@@ -611,29 +665,104 @@ void KinovaRobot::removeLogEntry(mc_control::MCGlobalController &gc) {
   }
 }
 
-void KinovaRobot::updateState() {
-  std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
-  m_state = m_base_cyclic->RefreshFeedback();
+void KinovaRobot::updateState() { m_state = m_base_cyclic->RefreshFeedback(); }
+
+void KinovaRobot::sendCommand() {
+  const k_api::RouterClientSendOptions options{false, 0, m_refresh_timeout_ms};
+  m_tick++;
+  int64_t now = GetTickUs();
+  if (m_last_send_us != 0)
+    m_dt = now - m_last_send_us;
+  m_last_send_us = now;
+  try {
+    PendingExchange exchange;
+    exchange.send_us = now;
+    exchange.tick = m_tick;
+    if (m_has_command) {
+      // Incrementing identifier ensures actuators can reject out of time
+      // frames (same scheme as Kinova's ros2 driver)
+      m_frame_id = (m_frame_id + 1) & 0xFFFF;
+      m_base_command.set_frame_id(m_frame_id);
+      for (int i = 0; i < m_actuator_count; i++)
+        m_base_command.mutable_actuators(i)->set_command_id(m_frame_id);
+      exchange.feedback =
+          m_base_cyclic->Refresh_async(m_base_command, 0, options);
+    } else {
+      exchange.feedback = m_base_cyclic->RefreshFeedback_async(0, options);
+    }
+    m_pending.push_back(std::move(exchange));
+  } catch (k_api::KDetailedException &ex) {
+    printException(ex);
+  }
 }
 
-void KinovaRobot::updateState(bool &running) {
-  m_base_cyclic->RefreshFeedback_callback(
-      [&, this](const Kinova::Api::Error &err,
-                const k_api::BaseCyclic::Feedback data) {
-        updateState(data);
-        checkBaseFaultBanks(data.base().fault_bank_a(),
-                            data.base().fault_bank_b());
-        // checkActuatorsFaultBanks(data);
-        if (err.error_code() != k_api::ErrorCodes::ERROR_NONE) {
-          printError(err);
-          running = false;
-        }
-      });
-}
+void KinovaRobot::receiveFeedback(int64_t deadline_us, bool &running) {
+  // Wait for this tick's reply, the last one sent, until the deadline.
+  // Deliberate spin, like the tick itself: a timed wait sleeps past its
+  // deadline by up to half a period on a non real-time kernel
+  if (!m_pending.empty() && m_pending.back().tick == m_tick) {
+    auto &feedback = m_pending.back().feedback;
+    while (GetTickUs() < deadline_us && feedback.wait_for(std::chrono::seconds(
+                                            0)) != std::future_status::ready) {
+    }
+  }
 
-void KinovaRobot::updateState(const k_api::BaseCyclic::Feedback &data) {
-  std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
-  m_state = data;
+  // Collect every reply that arrived, this tick's or late ones. A reply is
+  // only removed once it completed, so a destroyed future never blocks; the
+  // API completes each one within refresh_timeout_ms, with an error at worst
+  bool updated = false;
+  bool fresh = false;
+  for (auto it = m_pending.begin(); it != m_pending.end();) {
+    if (it->feedback.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready) {
+      ++it;
+      continue;
+    }
+    try {
+      auto feedback = it->feedback.get();
+      // Replies may complete out of order: only keep the most recent command's
+      if (it->tick > m_state_tick) {
+        m_state = std::move(feedback);
+        m_state_tick = it->tick;
+        m_refresh_rtt_us = GetTickUs() - it->send_us;
+        updated = true;
+        fresh = (it->tick == m_tick);
+      }
+    } catch (k_api::KDetailedException &ex) {
+      printException(ex);
+    }
+    it = m_pending.erase(it);
+  }
+  m_feedback_age = m_tick - m_state_tick;
+  if (m_pending.size() > 64) {
+    // The API completes every reply within refresh_timeout_ms: replies
+    // piling up mean the link is gone
+    mc_rtc::log::error("[mc_kortex] {} robot: {} exchanges without reply, "
+                       "stopping the controller",
+                       m_name, m_pending.size());
+    running = false;
+  }
+
+  if (!updated) {
+    // Keep running on the last feedback, the actuators hold the last command
+    m_missed_refresh++;
+    if (++m_consecutive_missed_refresh >= m_max_missed_refresh) {
+      mc_rtc::log::error("[mc_kortex] {} robot: no feedback for {} consecutive "
+                         "ticks, stopping the controller",
+                         m_name, m_consecutive_missed_refresh);
+      running = false;
+    }
+    return;
+  }
+  m_consecutive_missed_refresh = 0;
+  if (fresh)
+    m_fresh_feedback++;
+  else
+    m_late_feedback++;
+  for (int i = 0; i < m_actuator_count && i < m_state.actuators_size(); i++)
+    m_actuator_counter[i] = m_state.actuators(i).command_id() & 0xFFFF;
+  checkBaseFaultBanks(m_state.base().fault_bank_a(),
+                      m_state.base().fault_bank_b());
 }
 
 void KinovaRobot::torqueFrictionComputation(
@@ -749,29 +878,11 @@ KinovaRobot::currentTorqueControlLaw(mc_rbdyn::Robot &robot,
   return current;
 }
 
-bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
+bool KinovaRobot::buildCommand(mc_rbdyn::Robot &robot, bool &running) {
   bool return_value = true;
-  k_api::BaseCyclic::Feedback m_state_local;
-  {
-    std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
-    m_state_local = m_state;
-  }
-
-  std::unique_lock<std::mutex> lock(m_update_control_mutex);
+  // The feedback the controller just ran on
+  auto &m_state_local = m_state;
   auto rjo = robot.refJointOrder();
-
-  if (m_control_id == m_prev_control_id)
-    return false;
-
-  auto lambda_fct = [&, this](const Kinova::Api::Error &err,
-                              const k_api::BaseCyclic::Feedback data) {
-    updateState(data);
-    checkBaseFaultBanks(data.base().fault_bank_a(), data.base().fault_bank_b());
-    if (err.error_code() != k_api::ErrorCodes::ERROR_NONE) {
-      printError(err);
-      running = false;
-    }
-  };
 
   for (int i = 0; i < m_actuator_count; i++) {
     torqueFrictionComputation(robot, m_state_local, i);
@@ -840,43 +951,18 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   // if (m_control_mode != k_api::ActuatorConfig::ControlMode::POSITION)
   // std::cout << std::endl;
 
-  // ========================= Control mode has changed in mc_rtc, change it for
-  // the robot ========================= //
-  if (m_control_mode_id != m_prev_control_mode_id) {
-    auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
-    control_mode.set_control_mode(m_control_mode);
-
-    try {
-      mc_rtc::log::info("[mc_kortex] Changing robot control mode to {} ",
-                        m_control_mode);
-      for (int i = 0; i < m_actuator_count; i++) {
-        // printJointActiveControlLoop(i+1);
-        m_actuator_config->SetControlMode(control_mode, i + 1);
-        // printJointActiveControlLoop(i+1);
-      }
-      m_prev_control_mode_id = m_control_mode_id;
-    } catch (k_api::KDetailedException &ex) {
-      printException(ex);
-      return_value = false;
-      running = false;
-    }
-  }
-
-  try {
-    m_base_cyclic->Refresh_callback(m_base_command, lambda_fct, 0);
-    return_value = true;
-  } catch (k_api::KDetailedException &ex) {
-    printException(ex);
+  // Control mode has changed in mc_rtc, change it for the robot
+  if (!updateModeSwitch()) {
     return_value = false;
     running = false;
   }
 
-  m_prev_control_id = m_control_id;
+  // Sent at the start of the next tick, by sendCommand()
+  m_has_command = true;
   return return_value;
 }
 
 void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
-  std::unique_lock<std::mutex> lock(m_update_sensor_mutex);
   auto &robot = gc.controller().robots().robot(m_name);
   auto rjo = robot.refJointOrder();
 
@@ -962,10 +1048,8 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
 }
 
 void KinovaRobot::updateControl(mc_control::MCGlobalController &controller) {
-  std::unique_lock<std::mutex> lock(m_update_control_mutex);
   auto &robot = controller.controller().robots().robot(m_name);
   m_command = robot.mbc();
-  m_control_id++;
 }
 
 std::string KinovaRobot::controlLoopParamToString(
@@ -1136,66 +1220,105 @@ KinovaRobot::getActuatorFaultList(uint32_t fault_bank) {
   return fault_list;
 }
 
-void KinovaRobot::controlThread(mc_control::MCGlobalController &controller,
-                                std::mutex &startM,
-                                std::condition_variable &startCV, bool &start,
-                                bool &running) {
-  {
-    std::unique_lock<std::mutex> lock(startM);
-    startCV.wait(lock, [&]() { return start; });
-  }
-
-  setLowServoingMode();
-
-  int64_t now = 0;
-  int64_t last = 0;
-
-  addLogEntry(controller);
-
-  try {
-
-    while (not stop_controller) {
-      now = GetTickUs();
-      // Deliberate spin: this is the real-time thread, it must hit its
-      // 1kHz deadline and must not be descheduled by a sleep
-      if (now - last < 1000)
-        continue;
-      m_dt = now - last;
-      last = now;
-
-      if (m_servoing_mode == k_api::Base::ServoingMode::LOW_LEVEL_SERVOING) {
-        sendCommand(controller.robots().robot(m_name), running);
-      } else {
-        mc_rtc::log::info("high level servoing");
-        // updateState(running);
+bool KinovaRobot::updateModeSwitch() {
+  // The actuators' control mode is a per actuator setting, one request each.
+  // They all leave at once and are polled every tick, so the control loop
+  // keeps running while the base applies them. Meanwhile the command stays
+  // valid for both modes: in current mode the position field holds the
+  // measured position, in position mode the current field holds the measured
+  // current, so an actuator that did not switch yet holds where it is
+  if (!m_mode_switch.empty()) {
+    for (auto &request : m_mode_switch) {
+      if (request.wait_for(std::chrono::seconds(0)) !=
+          std::future_status::ready) {
+        if (GetTickUs() - m_mode_switch_start_us >
+            1000 * kModeSwitchTimeoutMs) {
+          mc_rtc::log::error("[mc_kortex] {} robot: control mode change to {} "
+                             "not acknowledged after {}ms",
+                             m_name, m_mode_switch_mode, kModeSwitchTimeoutMs);
+          return false;
+        }
+        return true;
       }
     }
-
-    removeLogEntry(controller);
-    removeDatastoreEntries(controller);
-
-    mc_rtc::log::warning("[MC_KORTEX] {} control loop killed", m_name);
-  } catch (k_api::KDetailedException &ex) {
-    mc_rtc::log::error("[MC_KORTEX] Kortex error: {}", ex.what());
-  } catch (std::runtime_error &ex2) {
-    mc_rtc::log::error("[MC_KORTEX] Runtime error: {}", ex2.what());
+    bool failed = false;
+    for (auto &request : m_mode_switch) {
+      try {
+        request.get();
+      } catch (k_api::KDetailedException &ex) {
+        printException(ex);
+        failed = true;
+      }
+    }
+    m_mode_switch.clear();
+    m_mode_switch_ms =
+        static_cast<double>(GetTickUs() - m_mode_switch_start_us) / 1000;
+    if (failed) {
+      mc_rtc::log::error("[mc_kortex] {} robot: control mode change to {} "
+                         "failed",
+                         m_name, m_mode_switch_mode);
+      return false;
+    }
+    mc_rtc::log::info("[mc_kortex] {} robot: control mode changed to {} in "
+                      "{:.1f}ms",
+                      m_name, m_mode_switch_mode, m_mode_switch_ms);
+    m_prev_control_mode_id = m_mode_switch_id;
   }
+
+  if (m_control_mode_id == m_prev_control_mode_id)
+    return true;
 
   auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
-  control_mode.set_control_mode(k_api::ActuatorConfig::ControlMode::POSITION);
-
-  for (int i = 0; i < m_actuator_count; i++) {
-    // printJointActiveControlLoop(i+1);
-    m_actuator_config->SetControlMode(control_mode, i + 1);
-    // printJointActiveControlLoop(i+1);
+  control_mode.set_control_mode(m_control_mode);
+  const k_api::RouterClientSendOptions options{false, 0, kModeSwitchTimeoutMs};
+  mc_rtc::log::info("[mc_kortex] {} robot: changing control mode to {}", m_name,
+                    m_control_mode);
+  m_mode_switch_id = m_control_mode_id;
+  m_mode_switch_mode = m_control_mode;
+  m_mode_switch_start_us = GetTickUs();
+  try {
+    for (int i = 0; i < m_actuator_count; i++) {
+      m_mode_switch.push_back(m_actuator_config->SetControlMode_async(
+          control_mode, i + 1, options));
+    }
+  } catch (k_api::KDetailedException &ex) {
+    printException(ex);
+    return false;
   }
+  return true;
+}
 
-  setSingleServoingMode();
+void KinovaRobot::startControl(mc_control::MCGlobalController &controller) {
+  setLowServoingMode();
+  addLogEntry(controller);
+}
+
+void KinovaRobot::stopControl(mc_control::MCGlobalController &controller) {
+  // Exchanges may still be in flight: let them complete before leaving low
+  // level servoing
+  for (auto &exchange : m_pending)
+    exchange.feedback.wait_for(std::chrono::milliseconds(m_refresh_timeout_ms));
+  m_pending.clear();
+  for (auto &request : m_mode_switch)
+    request.wait_for(std::chrono::milliseconds(kModeSwitchTimeoutMs));
+  m_mode_switch.clear();
+  removeLogEntry(controller);
+  removeDatastoreEntries(controller);
+  mc_rtc::log::warning("[MC_KORTEX] {} control loop killed", m_name);
+
+  try {
+    auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
+    control_mode.set_control_mode(k_api::ActuatorConfig::ControlMode::POSITION);
+    for (int i = 0; i < m_actuator_count; i++) {
+      m_actuator_config->SetControlMode(control_mode, i + 1);
+    }
+    setSingleServoingMode();
+  } catch (k_api::KDetailedException &ex) {
+    mc_rtc::log::error("[MC_KORTEX] Kortex error: {}", ex.what());
+  }
 
   removeGui(controller);
 }
-
-void KinovaRobot::stopController() { stop_controller = true; }
 
 void KinovaRobot::moveToHomePosition() {
   // Make sure the arm is in Single Level Servoing before executing an Action

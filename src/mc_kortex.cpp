@@ -10,7 +10,6 @@ void *global_thread_init(
   auto loop_data = new ControlLoopData();
   // Create mc_rtc's global controller
   loop_data->controller = new mc_control::MCGlobalController(gconfig);
-  loop_data->kinova_threads = new std::vector<std::thread>();
   auto &controller = *loop_data->controller;
   if (controller.controller().timeStep < 0.001) {
     mc_rtc::log::error_and_throw<std::runtime_error>(
@@ -102,19 +101,6 @@ void *global_thread_init(
         controller.running = false;
       }));
 
-  // Start control loops
-  static std::mutex startMutex;
-  static std::condition_variable startCV;
-  static bool startControl = false;
-  for (auto &kinova : kinovas) {
-    loop_data->kinova_threads->emplace_back([&]() {
-      kinova->controlThread(controller, startMutex, startCV, startControl,
-                            controller.running);
-    });
-  }
-  startControl = true;
-  startCV.notify_all();
-
   return loop_data;
 }
 
@@ -125,19 +111,101 @@ void run(void *data) {
   auto &controller = *controller_ptr;
   auto &kinovas = *control_data->kinovas;
 
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  double now = 0;
-  double last = ts.tv_sec * 1e6 + ts.tv_nsec * 1e-3;
-  controller.controller().logger().addLogEntry(
-      "perf_LoopDt", [&]() { return (now - last) / 1000; });
-
-  while (controller.running) {
+  auto now_us = []() {
+    timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    now = ts.tv_sec * 1e6 + ts.tv_nsec * 1e-3;
-    if (now - last > controller.timestep() * 1e6) {
-      // mc_rtc::log::info("[mc_kortex] Control loop elapsed time {}ms",
-      // (now-last)*1e-3);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+  };
+  const int64_t period_us =
+      static_cast<int64_t>(std::llround(controller.timestep() * 1e6));
+  int64_t now = now_us();
+  int64_t last = now;
+  int64_t next_tick = now;
+  int64_t overruns = 0;
+  controller.controller().logger().addLogEntry(
+      "perf_LoopDt", [&]() { return static_cast<double>(now - last) / 1000; });
+  controller.controller().logger().addLogEntry("perf_LoopOverruns",
+                                               [&]() { return overruns; });
+  // Duration of each phase of a tick (µs). The log is written while the
+  // controller runs, mid-tick: the entries hold the previous, complete tick
+  struct TickTiming {
+    int64_t start_delay = 0;    // tick start after its scheduled time
+    int64_t send = 0;           // sendCommand() of every arm
+    int64_t wait = 0;           // receiveFeedback() of every arm
+    int64_t wait_overshoot = 0; // end of the wait after its deadline
+    int64_t sensors = 0;        // setControlMode()/updateSensors()
+    int64_t controller = 0;     // controller.run(), logging included
+    int64_t build = 0;          // updateControl()/buildCommand()
+    int64_t total = 0;          // whole tick
+  };
+  TickTiming timing, last_timing;
+  auto &logger = controller.controller().logger();
+  logger.addLogEntry("perf_Tick_startDelay",
+                     [&]() { return last_timing.start_delay; });
+  logger.addLogEntry("perf_Tick_send", [&]() { return last_timing.send; });
+  logger.addLogEntry("perf_Tick_wait", [&]() { return last_timing.wait; });
+  logger.addLogEntry("perf_Tick_waitOvershoot",
+                     [&]() { return last_timing.wait_overshoot; });
+  logger.addLogEntry("perf_Tick_sensors",
+                     [&]() { return last_timing.sensors; });
+  logger.addLogEntry("perf_Tick_controller",
+                     [&]() { return last_timing.controller; });
+  logger.addLogEntry("perf_Tick_build", [&]() { return last_timing.build; });
+  logger.addLogEntry("perf_Tick_total", [&]() { return last_timing.total; });
+
+  // How long into a tick its feedback is awaited: the shortest of the arms
+  int64_t feedback_wait_us = period_us;
+  for (auto &kinova : kinovas) {
+    feedback_wait_us =
+        std::min<int64_t>(feedback_wait_us, kinova->feedbackWaitUs());
+  }
+  mc_rtc::log::info("[mc_kortex] Waiting up to {}us for the feedback of each "
+                    "tick",
+                    feedback_wait_us);
+
+  for (auto &kinova : kinovas) {
+    kinova->startControl(controller);
+  }
+
+  // One thread runs the whole tick:
+  //  1. every arm sends its command, at a fixed rate, then waits for its
+  //     feedback until feedback_wait_us into the tick (the arms in parallel).
+  //     A late reply is used at a later tick, the controller meanwhile runs
+  //     on the last feedback
+  //  2. sensors are updated from that feedback and the controller runs
+  //  3. the command for the next tick is built from the controller output
+  try {
+    while (controller.running) {
+      // A tick that ran more than half a period late skips the ticks it
+      // overlapped, rather than sending the next commands in a burst to catch
+      // up: commands never leave less than half a period apart
+      now = now_us();
+      while (now - next_tick > period_us / 2) {
+        next_tick += period_us;
+        overruns++;
+      }
+      // Deliberate spin: this is the real-time thread, it must hit its 1kHz
+      // deadline and must not be descheduled by a sleep
+      do {
+        now = now_us();
+      } while (now < next_tick);
+      const int64_t tick_start = now;
+      timing.start_delay = tick_start - next_tick;
+      next_tick += period_us;
+
+      for (auto &kinova : kinovas) {
+        kinova->sendCommand();
+      }
+      int64_t t_sent = now_us();
+      timing.send = t_sent - tick_start;
+      const int64_t deadline = tick_start + feedback_wait_us;
+      for (auto &kinova : kinovas) {
+        kinova->receiveFeedback(deadline, controller.running);
+      }
+      int64_t t_received = now_us();
+      timing.wait = t_received - t_sent;
+      timing.wait_overshoot = t_received - deadline;
+
       for (auto &kinova : kinovas) {
         if (controller.controller().datastore().has("TorqueMode"))
           kinova->setTorqueMode(
@@ -149,28 +217,44 @@ void run(void *data) {
                   "ControlMode"));
         kinova->updateSensors(controller);
       }
+      int64_t t_sensors = now_us();
+      timing.sensors = t_sensors - t_received;
 
       // Run the controller
       controller.run();
+      int64_t t_controller = now_us();
+      timing.controller = t_controller - t_sensors;
 
       for (auto &kinova : kinovas) {
         kinova->updateControl(controller);
+        kinova->buildCommand(controller.robots().robot(kinova->getName()),
+                             controller.running);
       }
+      int64_t t_built = now_us();
+      timing.build = t_built - t_controller;
+      timing.total = t_built - tick_start;
+      last_timing = timing;
 
       last = now;
     }
+  } catch (std::exception &ex) {
+    mc_rtc::log::error("[mc_kortex] Control loop error: {}", ex.what());
   }
 
   for (auto &kinova : kinovas) {
-    kinova->stopController();
+    kinova->stopControl(controller);
   }
 
-  for (auto &th : *control_data->kinova_threads) {
-    th.join();
+  controller.controller().logger().removeLogEntry("perf_LoopDt");
+  controller.controller().logger().removeLogEntry("perf_LoopOverruns");
+  for (const auto &entry :
+       {"perf_Tick_startDelay", "perf_Tick_send", "perf_Tick_wait",
+        "perf_Tick_waitOvershoot", "perf_Tick_sensors", "perf_Tick_controller",
+        "perf_Tick_build", "perf_Tick_total"}) {
+    controller.controller().logger().removeLogEntry(entry);
   }
 
   delete control_data->kinovas;
-  delete control_data->kinova_threads;
   delete controller_ptr;
   delete control_data;
 }

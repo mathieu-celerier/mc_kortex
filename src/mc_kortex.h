@@ -4,9 +4,8 @@
 namespace mc_kortex {
 
 struct ControlLoopDataBase {
-  ControlLoopDataBase() : controller(nullptr), kinova_threads(nullptr) {}
+  ControlLoopDataBase() : controller(nullptr) {}
   mc_control::MCGlobalController *controller;
-  std::vector<std::thread> *kinova_threads;
 };
 
 struct ControlLoopData : public ControlLoopDataBase {
