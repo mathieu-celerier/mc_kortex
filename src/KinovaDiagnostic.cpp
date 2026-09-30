@@ -2,6 +2,8 @@
 
 #include <mc_rtc/logging.h>
 
+#include <fmt/ranges.h>
+
 #include <ActuatorConfigClientRpc.h>
 #include <ActuatorCyclicClientRpc.h>
 #include <BaseClientRpc.h>
@@ -106,6 +108,34 @@ struct ActuatorReport {
    * (item name, status) pairs. The torque sensor is deliberately absent from
    * that list in the API: it cannot be self-calibrated. */
   std::vector<std::pair<std::string, std::string>> calibration_status;
+
+  /** The actuator's own control loops: what runs, and each loop's
+   * parameters (read only). kAz/kBz are the loop's discrete transfer function
+   * coefficients: a filter there adds phase lag to everything through it */
+  struct ControlLoop {
+    std::string name;
+    float error_saturation = 0;
+    float output_saturation = 0;
+    float error_dead_band = 0;
+    std::vector<float> kaz;
+    std::vector<float> kbz;
+
+    /** Firmwares answer for loops they do not expose with uninitialized
+     * memory: tiny magnitudes (1e-19, 1e-34, 1e-43) no real gain has */
+    bool exposed() const {
+      auto garbage = [](float v) { return v != 0 && std::abs(v) < 1e-12f; };
+      if (garbage(error_saturation) || garbage(output_saturation) ||
+          garbage(error_dead_band))
+        return false;
+      return std::none_of(kaz.begin(), kaz.end(), garbage) &&
+             std::none_of(kbz.begin(), kbz.end(), garbage);
+    }
+  };
+  std::string control_mode = "n/a";
+  std::string command_mode = "n/a";
+  bool has_activated_loop = false;
+  uint32_t activated_loop = 0;
+  std::vector<ControlLoop> control_loops;
 
   std::vector<std::string> anomalies;
 };
@@ -484,6 +514,81 @@ void readTorqueConfiguration(DiagnosticSession &session,
       mc_rtc::log::warning(
           "[mc_kortex] Could not read torque calibration of device {}: {}",
           report.device_id, ex.what());
+    }
+  }
+}
+
+/** Names of the loops set in a ControlLoopSelection bit mask */
+std::string controlLoopNames(uint32_t mask) {
+  std::vector<std::string> names;
+  for (int bit = 0; bit < 31; ++bit) {
+    uint32_t value = 1u << bit;
+    if (!(mask & value))
+      continue;
+    names.push_back(
+        k_api::ActuatorConfig::ControlLoopSelection_IsValid(value)
+            ? k_api::ActuatorConfig::ControlLoopSelection_Name(
+                  static_cast<k_api::ActuatorConfig::ControlLoopSelection>(
+                      value))
+            : fmt::format("0x{:x}", value));
+  }
+  return names.empty() ? "none" : fmt::format("{}", fmt::join(names, " | "));
+}
+
+/** Read the control loops of every actuator: modes, active loops, and the
+ * parameters of each loop. Read only */
+void readControlLoops(DiagnosticSession &session,
+                      std::vector<ActuatorReport> &reports) {
+  using namespace k_api::ActuatorConfig;
+  const std::vector<ControlLoopSelection> loops = {JOINT_POSITION,
+                                                   MOTOR_POSITION,
+                                                   JOINT_VELOCITY,
+                                                   MOTOR_VELOCITY,
+                                                   JOINT_TORQUE,
+                                                   MOTOR_CURRENT,
+                                                   JOINT_TORQUE_HIGH_VELOCITY};
+  for (auto &report : reports) {
+    auto config = session.actuator_config_;
+    auto warn = [&](const char *what, const std::exception &ex) {
+      mc_rtc::log::warning("[mc_kortex] Could not read {} of device {}: {}",
+                           what, report.device_id, ex.what());
+    };
+    try {
+      report.control_mode = ControlMode_Name(
+          config->GetControlMode(report.device_id).control_mode());
+    } catch (const std::exception &ex) {
+      warn("control mode", ex);
+    }
+    try {
+      report.command_mode = CommandMode_Name(
+          config->GetCommandMode(report.device_id).command_mode());
+    } catch (const std::exception &ex) {
+      warn("command mode", ex);
+    }
+    try {
+      report.activated_loop =
+          config->GetActivatedControlLoop(report.device_id).control_loop();
+      report.has_activated_loop = true;
+    } catch (const std::exception &ex) {
+      warn("activated control loop", ex);
+    }
+    for (auto loop : loops) {
+      try {
+        LoopSelection selection;
+        selection.set_loop_selection(loop);
+        auto parameters =
+            config->GetControlLoopParameters(selection, report.device_id);
+        ActuatorReport::ControlLoop entry;
+        entry.name = ControlLoopSelection_Name(loop);
+        entry.error_saturation = parameters.error_saturation();
+        entry.output_saturation = parameters.output_saturation();
+        entry.error_dead_band = parameters.error_dead_band();
+        entry.kaz.assign(parameters.kaz().begin(), parameters.kaz().end());
+        entry.kbz.assign(parameters.kbz().begin(), parameters.kbz().end());
+        report.control_loops.push_back(std::move(entry));
+      } catch (const std::exception &ex) {
+        warn(ControlLoopSelection_Name(loop).c_str(), ex);
+      }
     }
   }
 }
@@ -961,6 +1066,28 @@ void printReport(const ArmIdentity &arm,
     }
   }
 
+  mc_rtc::log::info("===== Actuator control loops =====");
+  for (size_t i = 0; i < reports.size(); ++i) {
+    const auto &r = reports[i];
+    mc_rtc::log::info(
+        "joint_{}: control mode {} | command mode {} | active loops {}", i + 1,
+        r.control_mode, r.command_mode,
+        r.has_activated_loop ? controlLoopNames(r.activated_loop) : "n/a");
+    for (const auto &loop : r.control_loops) {
+      if (!loop.exposed()) {
+        mc_rtc::log::info("         {}: not exposed by the firmware "
+                          "(uninitialized values)",
+                          loop.name);
+        continue;
+      }
+      mc_rtc::log::info("         {}: kAz [{}] kBz [{}] | error saturation {} "
+                        "| output saturation {} | error dead band {}",
+                        loop.name, fmt::join(loop.kaz, ", "),
+                        fmt::join(loop.kbz, ", "), loop.error_saturation,
+                        loop.output_saturation, loop.error_dead_band);
+    }
+  }
+
   mc_rtc::log::info("===== Self-calibrated items =====");
   for (size_t i = 0; i < reports.size(); ++i) {
     const auto &r = reports[i];
@@ -1052,6 +1179,7 @@ int runDiagnostic(const DiagnosticOptions &opts) {
     sampleFeedback(session, reports, opts.duration);
     readTorqueConfiguration(session, reports);
     readCalibrationStatus(session, reports);
+    readControlLoops(session, reports);
 
     // The actuator cyclic service answers over the TCP router, so try reading
     // the gauges without touching the servoing mode first. Low level servoing
