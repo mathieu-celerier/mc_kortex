@@ -222,17 +222,71 @@ base at startup. Each actuator gets its faults cleared, takes cyclic commands
 and has its servoing enabled, then the control loop exchanges with every
 device in parallel, each tick.
 
-The actuators are chained: a reply takes about 50 µs longer per joint down the
-arm (about 370 µs for joint 1, 650 µs for joint 7, median). With the default
-`feedback_wait_us: 600`, joint 7's reply misses most ticks and reaches the
+The actuators are chained and serve the requests one at a time, about 45 µs
+apart. mc_kortex addresses joint 7, the farthest, first, which evens out the
+replies: they arrive between about 560 and 660 µs (median). With the
+default `feedback_wait_us: 600`, most of them miss the deadline and reach the
 controller a tick later: use `feedback_wait_us: 750` in bypass. On a Gen3,
 bypass took the command to measured current delay from about 4.9 ms through
-the base down to about 3.05 ms.
+the base down to about 3.05 ms, on every joint.
 
-The actuators' addresses are on the arm's internal network (10.10.0.x): this
-computer needs a route to them through the base, e.g.
-`sudo ip route add 10.10.0.0/24 via 192.168.1.10`. A VPN that routes the same
-subnet takes precedence: add host routes (`/32`) for the actuators instead.
+#### Network routes to the actuators
+
+In bypass, the computer talks to the actuators and the interconnect at their
+addresses on the arm's internal network, 10.10.0.x by default (the base
+reports them at startup). The base forwards to them, but the computer needs a
+route to that network through the base, or the startup times out reaching the
+first actuator. Below, `192.168.1.10` is the base's default address and
+`<profile>` the NetworkManager profile of the interface connected to the robot
+(`nmcli connection show` lists them): adapt both to your setup.
+
+Without a VPN, one route is enough:
+
+```bash
+# Until the next reboot or disconnection
+sudo ip route add 10.10.0.0/24 via 192.168.1.10
+# Persistent, applied whenever the profile is up
+nmcli connection modify <profile> +ipv4.routes "10.10.0.0/24 192.168.1.10"
+nmcli connection up <profile>
+```
+
+**With a VPN.** Some VPN clients route 10.0.0.0/8 or 10.10.0.0/24 through the
+tunnel, and may add host routes for 10.10.0.x addresses of their own network.
+A route in the main table then loses, or gets replaced when the VPN
+reconnects, and the startup fails the same way. Check with
+`ip route get 10.10.0.10`: it must go via the base, not the VPN interface.
+In that case, give the actuators host routes in their own routing table,
+looked up by a rule placed before the main table:
+
+```bash
+routes=""
+for i in $(seq 10 17); do   # 7 actuators (.10 to .16) and the interconnect (.17)
+  routes="$routes${routes:+, }10.10.0.$i/32 192.168.1.10 table=100"
+done
+nmcli connection modify <profile> \
+  ipv4.routes "$routes" \
+  ipv4.routing-rules "priority 100 to 10.10.0.0/24 table 100"
+nmcli connection up <profile>
+```
+
+Table 100 and priority 100 must be free: check `ip rule` and
+`/etc/iproute2/rt_tables`, whose entries VPN clients also use. Only the
+listed addresses are in table 100: the rest of 10.10.0.0/24 falls through to
+the main table and still goes through the VPN. NetworkManager adds the routes
+and the rule when the profile is up and removes them when it goes down. Adapt
+the address list if your arm has another number of actuators.
+
+Check with the robot connected:
+
+```bash
+ip rule | grep 'lookup 100'   # 100: from all to 10.10.0.0/24 lookup 100
+ip route get 10.10.0.17       # via 192.168.1.10 dev <robot interface>
+```
+
+To remove them:
+`nmcli connection modify <profile> ipv4.routes "" ipv4.routing-rules ""`.
+
+#### Safety
 
 The base supervises nothing in this mode: mc_kortex stops on any actuator
 fault. At startup, it compares, joint by joint, the state the base reports
