@@ -74,6 +74,11 @@ private:
   bool gripper_enabled;
   size_t gripper_idx;
   std::string m_gripper_name;
+  // Index of the actuated joint in the gripper's q(), and its joint limits,
+  // used to map between Kortex's 0% (open) - 100% (closed) and joint values
+  size_t m_gripper_q_idx;
+  double m_gripper_open_q;
+  double m_gripper_closed_q;
   k_api::GripperCyclic::MotorCommand *m_gripper_motor_command;
   float gripper_position;
   float gripper_velocity;
@@ -186,6 +191,8 @@ private:
 
   double jointPoseToRad(int joint_idx, double deg);
   double radToJointPose(int joint_idx, double rad);
+  double gripperPercentToJoint(double percent) const;
+  double jointToGripperPercent(double q) const;
   std::vector<double>
   computePostureTaskOffset(mc_rbdyn::Robot &robot,
                            mc_tasks::PostureTaskPtr posture_task);

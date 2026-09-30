@@ -1,5 +1,6 @@
 #include "KinovaRobot.h"
 #include <Eigen/src/Core/Matrix.h>
+#include <algorithm>
 #include <cmath>
 #include <fmt/ranges.h>
 #include <mc_rtc/DataStore.h>
@@ -300,6 +301,30 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
           "mc_kortex only supports a single actuated gripper joint",
           m_name, m_gripper_name, gripper.activeJoints().size());
     }
+    // Kortex reports and commands the gripper in percent (0 = open, 100 =
+    // closed), store the actuated joint's limits to convert to joint values
+    const auto &active_joint = gripper.activeJoints()[0];
+    const auto &gripper_joints = gripper.joints();
+    m_gripper_q_idx = static_cast<size_t>(std::distance(
+        gripper_joints.begin(),
+        std::find(gripper_joints.begin(), gripper_joints.end(), active_joint)));
+    // The gripper joints may be fixed in the control robot (kept out of the
+    // QP), mc_rtc drives the gripper on the output (canonical) robot: read the
+    // limits there
+    const auto &output_robot = gc.controller().outputRobot(m_name);
+    auto joint_mbc_idx = output_robot.jointIndexByName(active_joint);
+    double lower = output_robot.ql()[joint_mbc_idx][0];
+    double upper = output_robot.qu()[joint_mbc_idx][0];
+    // Same convention as mc_control::Gripper's reverseLimits: when true, the
+    // gripper is open at the lower limit
+    bool reverse_limits = false;
+    for (const auto &g : output_robot.module().grippers()) {
+      if (g.name == m_gripper_name) {
+        reverse_limits = g.reverse_limits;
+      }
+    }
+    m_gripper_open_q = reverse_limits ? lower : upper;
+    m_gripper_closed_q = reverse_limits ? upper : lower;
     // The gripper is appended right after the actuators in the sensor vectors
     gripper_idx = m_actuator_count;
     mc_rtc::log::info("[mc_kortex] Gripper \"{}\" enabled for robot: {}",
@@ -802,7 +827,8 @@ bool KinovaRobot::sendCommand(mc_rbdyn::Robot &robot, bool &running) {
   }
 
   if (gripper_enabled) {
-    float gripper_target = robot.gripper(m_gripper_name).q()[0] * 100.0;
+    float gripper_target = jointToGripperPercent(
+        robot.gripper(m_gripper_name).q()[m_gripper_q_idx]);
     float gripper_velocity_target =
         fabs(gripper_target - gripper_position) * 2.2; //*0.001;
     if (gripper_velocity_target > 100.0)
@@ -910,8 +936,9 @@ void KinovaRobot::updateSensors(mc_control::MCGlobalController &gc) {
       gripper_velocity = inter.gripper_feedback().motor()[0].velocity();
     }
 
-    q[gripper_idx] = jointPoseToRad(gripper_idx, gripper_position);
-    qdot[gripper_idx] = mc_rtc::constants::toRad(gripper_velocity);
+    q[gripper_idx] = gripperPercentToJoint(gripper_position);
+    qdot[gripper_idx] =
+        gripper_velocity / 100.0 * (m_gripper_closed_q - m_gripper_open_q);
     tau[gripper_idx] = 0.0;
     // m_tau_sensor(gripper_idx) = tau[gripper_idx];
     // m_current_measurement(gripper_idx) =
@@ -1406,6 +1433,18 @@ double KinovaRobot::jointPoseToRad(int /* joint_idx */, double deg) {
 
 double KinovaRobot::radToJointPose(int /* joint_idx */, double rad) {
   return mc_rtc::constants::toDeg((rad > 0) ? rad : 2 * M_PI + rad);
+}
+
+double KinovaRobot::gripperPercentToJoint(double percent) const {
+  percent = std::clamp(percent, 0.0, 100.0);
+  return m_gripper_open_q +
+         percent / 100.0 * (m_gripper_closed_q - m_gripper_open_q);
+}
+
+double KinovaRobot::jointToGripperPercent(double q) const {
+  double percent =
+      100.0 * (q - m_gripper_open_q) / (m_gripper_closed_q - m_gripper_open_q);
+  return std::clamp(percent, 0.0, 100.0);
 }
 
 std::vector<double>
