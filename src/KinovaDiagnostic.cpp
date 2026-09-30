@@ -265,8 +265,7 @@ public:
 
     device_manager_ = new k_api::DeviceManager::DeviceManagerClient(router_);
     device_config_ = new k_api::DeviceConfig::DeviceConfigClient(router_);
-    actuator_config_ =
-        new k_api::ActuatorConfig::ActuatorConfigClient(router_);
+    actuator_config_ = new k_api::ActuatorConfig::ActuatorConfigClient(router_);
     base_ = new k_api::Base::BaseClient(router_);
     base_cyclic_ = new k_api::BaseCyclic::BaseCyclicClient(router_rt_);
     actuator_cyclic_ =
@@ -407,15 +406,15 @@ std::vector<ActuatorReport> discoverActuators(DiagnosticSession &session) {
           session.device_config_->GetFirmwareVersion(report.device_id)
               .firmware_version();
     } catch (const k_api::KDetailedException &ex) {
-      mc_rtc::log::warning("[mc_kortex] Could not read identity of device {}: {}",
-                           report.device_id, ex.what());
+      mc_rtc::log::warning(
+          "[mc_kortex] Could not read identity of device {}: {}",
+          report.device_id, ex.what());
     }
     ordered.emplace_back(handle.order(), report);
   }
-  std::sort(ordered.begin(), ordered.end(),
-            [](const auto &lhs, const auto &rhs) {
-              return lhs.first < rhs.first;
-            });
+  std::sort(
+      ordered.begin(), ordered.end(),
+      [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
   std::vector<ActuatorReport> reports;
   reports.reserve(ordered.size());
   for (auto &entry : ordered)
@@ -428,8 +427,8 @@ void sampleFeedback(DiagnosticSession &session,
                     std::vector<ActuatorReport> &reports, double duration) {
   size_t samples =
       std::max<size_t>(1, static_cast<size_t>(duration * SAMPLING_FREQUENCY));
-  auto period = std::chrono::microseconds(
-      static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
+  auto period =
+      std::chrono::microseconds(static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
   mc_rtc::log::info(
       "[mc_kortex] Sampling actuator feedback for {:.1f}s ({} samples), "
       "move the joints by hand to exercise the torque sensors",
@@ -507,16 +506,16 @@ void readCalibrationStatus(DiagnosticSession &session,
       element.set_calibration_item(item);
       std::string name = k_api::DeviceConfig::CalibrationItem_Name(item);
       try {
-        auto result =
-            session.device_config_->GetCalibrationResult(element,
-                                                         report.device_id);
+        auto result = session.device_config_->GetCalibrationResult(
+            element, report.device_id);
         report.calibration_status.emplace_back(
             name, k_api::DeviceConfig::CalibrationStatus_Name(
                       result.calibration_status()));
       } catch (const k_api::KDetailedException &ex) {
         // Not every firmware answers this RPC on actuators. Report it once
         // rather than failing loudly seven times over.
-        if (report.device_id == reports.front().device_id && item == items.front()) {
+        if (report.device_id == reports.front().device_id &&
+            item == items.front()) {
           mc_rtc::log::warning(
               "[mc_kortex] Calibration status is not available on this arm: {}",
               ex.what());
@@ -524,11 +523,9 @@ void readCalibrationStatus(DiagnosticSession &session,
         report.calibration_status.emplace_back(name, "UNAVAILABLE");
       }
     }
-    bool none_available =
-        std::all_of(report.calibration_status.begin(),
-                    report.calibration_status.end(), [](const auto &entry) {
-                      return entry.second == "UNAVAILABLE";
-                    });
+    bool none_available = std::all_of(
+        report.calibration_status.begin(), report.calibration_status.end(),
+        [](const auto &entry) { return entry.second == "UNAVAILABLE"; });
     if (report.device_id == reports.front().device_id && none_available) {
       // The RPC is unsupported arm-wide, no point querying the other actuators
       for (auto &other : reports) {
@@ -628,8 +625,8 @@ bool sampleStrainGauges(DiagnosticSession &session,
 
   size_t samples =
       std::max<size_t>(1, static_cast<size_t>(duration * SAMPLING_FREQUENCY));
-  auto period = std::chrono::microseconds(
-      static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
+  auto period =
+      std::chrono::microseconds(static_cast<int64_t>(1e6 / SAMPLING_FREQUENCY));
 
   // Per sample dump: timestamp, every gauge of every actuator, and the torque
   // each actuator reports at the same instant
@@ -665,8 +662,7 @@ bool sampleStrainGauges(DiagnosticSession &session,
               static_cast<double>(wordToInt32(customDataChannel(data, g)));
           double value =
               wordToFloat(customDataChannel(data, g + STRAIN_GAUGE_COUNT));
-          report.gauge_raw[static_cast<size_t>(g)].add(
-              static_cast<float>(raw));
+          report.gauge_raw[static_cast<size_t>(g)].add(static_cast<float>(raw));
           report.gauge_value[static_cast<size_t>(g)].add(
               static_cast<float>(value));
           row[i][static_cast<size_t>(g)] = raw;
@@ -727,8 +723,9 @@ bool sampleStrainGauges(DiagnosticSession &session,
     }
   }
 
-  return std::any_of(reports.begin(), reports.end(),
-                     [](const ActuatorReport &r) { return r.has_strain_gauges; });
+  return std::any_of(
+      reports.begin(), reports.end(),
+      [](const ActuatorReport &r) { return r.has_strain_gauges; });
 }
 
 /** Base client of the guard currently holding low level servoing, if any
@@ -745,8 +742,8 @@ void restoreServoingOnSignal(int signum) {
   if (base != nullptr) {
     try {
       auto mode = k_api::Base::ServoingModeInformation();
-      mode.set_servoing_mode(static_cast<k_api::Base::ServoingMode>(
-          g_low_level_previous.load()));
+      mode.set_servoing_mode(
+          static_cast<k_api::Base::ServoingMode>(g_low_level_previous.load()));
       base->SetServoingMode(mode);
     } catch (...) {
       // Nothing useful to do from a signal handler, the message below is the
@@ -810,8 +807,8 @@ void reportNewFaults(DiagnosticSession &session,
                      const std::vector<ActuatorReport> &before) {
   try {
     auto feedback = session.base_cyclic_->RefreshFeedback();
-    int count =
-        std::min<int>(feedback.actuators_size(), static_cast<int>(before.size()));
+    int count = std::min<int>(feedback.actuators_size(),
+                              static_cast<int>(before.size()));
     for (int i = 0; i < count; ++i) {
       uint32_t bank_a = feedback.actuators(i).fault_bank_a();
       uint32_t raised = bank_a & ~before[static_cast<size_t>(i)].fault_bank_a;
@@ -844,8 +841,8 @@ void detectAnomalies(std::vector<ActuatorReport> &reports) {
     }
 
     if (report.fault_bank_a != 0) {
-      report.anomalies.push_back(
-          fmt::format("fault bank A is set: {}", decodeBankA(report.fault_bank_a)));
+      report.anomalies.push_back(fmt::format("fault bank A is set: {}",
+                                             decodeBankA(report.fault_bank_a)));
     }
     if (report.fault_bank_b != 0) {
       report.anomalies.push_back(
@@ -884,16 +881,13 @@ void detectAnomalies(std::vector<ActuatorReport> &reports) {
       }
       // Live gauges behind a dead converted value settle the question: the
       // sensor works and only its calibration is missing
-      bool gauges_alive =
-          std::all_of(report.gauge_raw.begin(), report.gauge_raw.end(),
-                      [](const SignalStats &s) {
-                        return s.distinct.size() > 1;
-                      });
+      bool gauges_alive = std::all_of(
+          report.gauge_raw.begin(), report.gauge_raw.end(),
+          [](const SignalStats &s) { return s.distinct.size() > 1; });
       bool values_dead =
           std::all_of(report.gauge_value.begin(), report.gauge_value.end(),
                       [](const SignalStats &s) {
-                        return s.distinct.size() == 1 &&
-                               std::abs(s.min) < 1e-9;
+                        return s.distinct.size() == 1 && std::abs(s.min) < 1e-9;
                       });
       if (gauges_alive && values_dead) {
         report.anomalies.push_back(
@@ -961,8 +955,7 @@ void printReport(const ArmIdentity &arm,
                       "global offset {:.6f}",
                       i + 1, offset, r.global_gain, r.global_offset);
     for (size_t g = 0; g < r.gauge_gain.size(); ++g) {
-      double gauge_offset =
-          g < r.gauge_offset.size() ? r.gauge_offset[g] : 0.0;
+      double gauge_offset = g < r.gauge_offset.size() ? r.gauge_offset[g] : 0.0;
       mc_rtc::log::info("         gauge {}: gain {:.6f} offset {:.6f}", g,
                         r.gauge_gain[g], gauge_offset);
     }
@@ -1063,9 +1056,8 @@ int runDiagnostic(const DiagnosticOptions &opts) {
     // The actuator cyclic service answers over the TCP router, so try reading
     // the gauges without touching the servoing mode first. Low level servoing
     // is only worth the risk if that genuinely fails.
-    bool gauges_read = sampleStrainGauges(session, reports,
-                                          opts.low_level_duration,
-                                          opts.dump_path);
+    bool gauges_read = sampleStrainGauges(
+        session, reports, opts.low_level_duration, opts.dump_path);
     if (!gauges_read) {
       if (opts.low_level) {
         mc_rtc::log::warning(
@@ -1076,9 +1068,8 @@ int runDiagnostic(const DiagnosticOptions &opts) {
         auto faults_before = reports;
         {
           LowLevelServoingGuard guard(session.base_, servoing_mode);
-          gauges_read = sampleStrainGauges(session, reports,
-                                           opts.low_level_duration,
-                                           opts.dump_path);
+          gauges_read = sampleStrainGauges(
+              session, reports, opts.low_level_duration, opts.dump_path);
         }
         reportNewFaults(session, faults_before);
       } else {
@@ -1123,10 +1114,9 @@ int runDiagnostic(const DiagnosticOptions &opts) {
   bool gauges_confirmed_alive =
       std::any_of(reports.begin(), reports.end(), [](const auto &r) {
         return r.has_strain_gauges && r.torque.distinct.size() == 1 &&
-               std::all_of(r.gauge_raw.begin(), r.gauge_raw.end(),
-                           [](const SignalStats &s) {
-                             return s.distinct.size() > 1;
-                           });
+               std::all_of(
+                   r.gauge_raw.begin(), r.gauge_raw.end(),
+                   [](const SignalStats &s) { return s.distinct.size() > 1; });
       });
   if (gauges_confirmed_alive) {
     mc_rtc::log::warning(
