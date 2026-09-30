@@ -768,13 +768,17 @@ void KinovaRobot::sendCommand() {
       }
     } else {
       // Each actuator and the interconnect get their part of the arm command,
-      // all at once. The actuator echoes command_id back as feedback_id
+      // all at once. The actuator echoes command_id back as feedback_id.
+      // The actuators are chained, a reply takes longer the further the joint:
+      // the farthest is addressed first so its request does not queue behind
+      // the others on the shared links
       auto message_id = k_api::ActuatorCyclic::MessageId();
       message_id.set_identifier(m_frame_id);
-      for (int i = 0; i < m_actuator_count; i++) {
+      exchange.actuators.resize(m_actuator_count);
+      for (int i = m_actuator_count - 1; i >= 0; i--) {
         auto *cyclic = m_bypass_actuators[i].cyclic;
         auto [reply, callback] = makeReply<k_api::ActuatorCyclic::Feedback>();
-        exchange.actuators.push_back(reply);
+        exchange.actuators[i] = reply;
         if (m_has_command) {
           const auto &arm_command = m_base_command.actuators(i);
           k_api::ActuatorCyclic::Command command;
