@@ -4,15 +4,20 @@
 
 #include <boost/circular_buffer.hpp>
 
+#include <atomic>
 #include <deque>
 #include <future>
+#include <memory>
 
 #include <ActuatorConfigClientRpc.h>
+#include <ActuatorCyclicClientRpc.h>
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
+#include <DeviceConfigClientRpc.h>
 #include <DeviceManagerClientRpc.h>
 #include <GripperCyclicMessage.pb.h>
 #include <InterconnectConfigClientRpc.h>
+#include <InterconnectCyclicClientRpc.h>
 #include <RouterClient.h>
 #include <SessionManager.h>
 #include <TransportClientTcp.h>
@@ -27,6 +32,11 @@ namespace mc_kinova {
 
 enum TorqueControlType { Default, Feedforward, Custom };
 
+// How the cyclic commands reach the actuators: through the base, which
+// relays them (LOW_LEVEL_SERVOING), or straight to each actuator and to the
+// interconnect, the base out of the loop (BYPASS_SERVOING)
+enum class LowLevelType { Base, Bypass };
+
 class KinovaRobot {
 private:
   k_api::RouterClient *m_router;
@@ -39,6 +49,28 @@ private:
   k_api::BaseCyclic::BaseCyclicClient *m_base_cyclic;
   k_api::DeviceManager::DeviceManagerClient *m_device_manager;
   k_api::ActuatorConfig::ActuatorConfigClient *m_actuator_config;
+  k_api::DeviceConfig::DeviceConfigClient *m_device_config;
+
+  // ===== Low level bypass =====
+  // One UDP connection per device, to its own address, in bypass. The
+  // addresses are discovered in init(), the connections exist while
+  // controlling, between startControl() and stopControl()
+  LowLevelType m_low_level_type;
+  struct BypassDevice {
+    std::string ip_address;
+    uint32_t device_id = 0;
+    uint32_t order = 0;
+    k_api::TransportClientUdp *transport = nullptr;
+    k_api::RouterClient *router = nullptr;
+    // Actuators only
+    k_api::ActuatorConfig::ActuatorConfigClient *config = nullptr;
+    k_api::ActuatorCyclic::ActuatorCyclicClient *cyclic = nullptr;
+    // Interconnect only
+    k_api::InterconnectCyclic::InterconnectCyclicClient *interconnect = nullptr;
+  };
+  std::vector<BypassDevice> m_bypass_actuators;
+  BypassDevice m_bypass_interconnect;
+  bool m_bypass_has_interconnect;
 
   std::string m_username;
   std::string m_password;
@@ -65,18 +97,42 @@ private:
   // the deadline stays queued and is used at a later tick, the controller
   // meanwhile runs on the last feedback it got: the send rate never depends
   // on the reply time
+public:
+  // The reply to one request, filled by the API's callback on its receive
+  // thread and polled by the control loop. The API's _async variants are not
+  // used: each call starts a thread (std::async), 8 per tick in bypass
+  template <typename T> struct Reply {
+    std::atomic<bool> done{false};
+    // When the callback ran, on the same clock as GetTickUs()
+    int64_t arrival_us = 0;
+    bool ok = false;
+    std::string error;
+    T value;
+  };
+  template <typename T> using ReplyPtr = std::shared_ptr<Reply<T>>;
   struct PendingExchange {
-    std::future<k_api::BaseCyclic::Feedback> feedback;
+    // Through the base: one exchange for the whole arm
+    ReplyPtr<k_api::BaseCyclic::Feedback> feedback;
+    // In bypass: one exchange per actuator, and one with the interconnect
+    std::vector<ReplyPtr<k_api::ActuatorCyclic::Feedback>> actuators;
+    ReplyPtr<k_api::InterconnectCyclic::Feedback> interconnect;
     int64_t send_us;
     int64_t tick;
   };
+
+private:
   std::deque<PendingExchange> m_pending;
   int64_t m_tick;
   // Tick whose exchange produced m_state
   int64_t m_state_tick;
+  // In bypass, the tick whose exchange produced each actuator's feedback
+  std::vector<int64_t> m_actuator_state_tick;
+  int64_t m_interconnect_state_tick;
   int64_t m_last_send_us;
-  // Time between sending a command and noticing its feedback
+  // Time between sending a command and its feedback arriving
   int64_t m_refresh_rtt_us;
+  // In bypass, the same for each actuator's last reply
+  std::vector<double> m_actuator_rtt_us;
   // How many ticks old the feedback the controller runs on is: 0 when the
   // feedback of this tick's exchange arrived before the deadline
   int64_t m_feedback_age;
@@ -238,6 +294,22 @@ public:
   // ============================== //
 private:
   void initFiltersBuffers(void);
+
+  // ===== Low level bypass =====
+  // Reads the address of every actuator and of the interconnect
+  void discoverBypassDevices();
+  // Connects to every device and prepares each actuator for cyclic control,
+  // as Kinova's low level bypass example does
+  void startBypass();
+  void disconnectBypassDevices();
+  // Collects the replies of the pending exchanges, returns whether any
+  // feedback was updated and, through fresh, whether all of it is this tick's
+  bool collectBaseFeedback(bool &fresh);
+  bool collectBypassFeedback(bool &fresh);
+  // Sets the control mode of actuator i, through the base or directly
+  std::future<void> setActuatorControlModeAsync(
+      int i, const k_api::ActuatorConfig::ControlModeInformation &control_mode,
+      const k_api::RouterClientSendOptions &options);
 
   void addGui(mc_control::MCGlobalController &gc);
   void removeGui(mc_control::MCGlobalController &gc);

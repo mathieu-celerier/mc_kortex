@@ -163,10 +163,6 @@ void run(void *data) {
                     "tick",
                     feedback_wait_us);
 
-  for (auto &kinova : kinovas) {
-    kinova->startControl(controller);
-  }
-
   // One thread runs the whole tick:
   //  1. every arm sends its command, at a fixed rate, then waits for its
   //     feedback until feedback_wait_us into the tick (the arms in parallel).
@@ -175,6 +171,11 @@ void run(void *data) {
   //  2. sensors are updated from that feedback and the controller runs
   //  3. the command for the next tick is built from the controller output
   try {
+    // Inside the try: an arm that fails to enter low level servoing, halfway
+    // through, must still be brought back to single level servoing below
+    for (auto &kinova : kinovas) {
+      kinova->startControl(controller);
+    }
     while (controller.running) {
       // A tick that ran more than half a period late skips the ticks it
       // overlapped, rather than sending the next commands in a burst to catch

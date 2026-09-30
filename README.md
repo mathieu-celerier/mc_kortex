@@ -117,6 +117,10 @@ Kortex:
     username: admin   # Default username (may differ on your setup)
     password: admin   # Default password
 
+    # How the cyclic commands reach the actuators: base (relayed by the base)
+    # or bypass (straight to each actuator, the base out of the loop)
+    low_level_type: base
+
     # Cyclic exchange: how long into a tick its feedback is awaited (µs), when
     # a reply is given up (ms), and how many consecutive ticks without any
     # feedback stop the controller
@@ -207,6 +211,33 @@ measure the exchange:
 
 A control mode change (e.g. `Position` to `Torque`) sends one request per
 actuator, all at once, and the loop keeps running while the base applies them.
+
+### Low level bypass
+
+With `low_level_type: bypass`, the base is put in bypass servoing and
+mc_kortex talks to each actuator, and to the interconnect for the gripper,
+directly at its own address (UDP port 10000), as Kinova's
+`300-BaseGen3_low_level_bypass` example does. The addresses are read from the
+base at startup. Each actuator gets its faults cleared, takes cyclic commands
+and has its servoing enabled, then the control loop exchanges with every
+device in parallel, each tick.
+
+The actuators are chained: a reply takes about 50 µs longer per joint down the
+arm (about 370 µs for joint 1, 650 µs for joint 7, median). With the default
+`feedback_wait_us: 600`, joint 7's reply misses most ticks and reaches the
+controller a tick later: use `feedback_wait_us: 750` in bypass. On a Gen3,
+bypass took the command to measured current delay from about 4.9 ms through
+the base down to about 3.05 ms.
+
+The actuators' addresses are on the arm's internal network (10.10.0.x): this
+computer needs a route to them through the base, e.g.
+`sudo ip route add 10.10.0.0/24 via 192.168.1.10`. A VPN that routes the same
+subnet takes precedence: add host routes (`/32`) for the actuators instead.
+
+The base supervises nothing in this mode: mc_kortex stops on any actuator
+fault. At startup, it compares, joint by joint, the state the base reports
+with the one each actuator reports on its own, and warns when they differ:
+mc_kortex relies on the base's conventions.
 
 ## Running Your Controller
 

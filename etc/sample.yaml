@@ -8,6 +8,10 @@ Kortex:
     username: your_username
     password: your_password
 
+    # How the cyclic commands reach the actuators: base (relayed by the base)
+    # or bypass (straight to each actuator, the base out of the loop)
+    low_level_type: base
+
     # Cyclic exchange: how long into a tick its feedback is awaited (µs), when
     # a reply is given up (ms), and how many consecutive ticks without any
     # feedback stop the controller

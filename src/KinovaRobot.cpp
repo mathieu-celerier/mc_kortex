@@ -22,6 +22,10 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
   m_base_cyclic = nullptr;
   m_device_manager = nullptr;
   m_actuator_config = nullptr;
+  m_device_config = nullptr;
+  m_low_level_type = LowLevelType::Base;
+  m_bypass_has_interconnect = false;
+  m_interconnect_state_tick = -1;
   gripper_enabled = false;
   m_state = k_api::BaseCyclic::Feedback();
   m_control_mode = k_api::ActuatorConfig::ControlMode::POSITION;
@@ -50,6 +54,7 @@ KinovaRobot::KinovaRobot(const std::string &name, const std::string &ip_address,
 }
 
 KinovaRobot::~KinovaRobot() {
+  disconnectBypassDevices();
   // Every handle below is only created by init(), which may never have run or
   // may have thrown halfway through
   // Close API session
@@ -70,6 +75,7 @@ KinovaRobot::~KinovaRobot() {
 
   // Destroy the API
   delete m_actuator_config;
+  delete m_device_config;
   delete m_device_manager;
   delete m_session_manager_real_time;
   delete m_session_manager;
@@ -288,6 +294,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   // Create services
   m_device_manager = new k_api::DeviceManager::DeviceManagerClient(m_router);
   m_actuator_config = new k_api::ActuatorConfig::ActuatorConfigClient(m_router);
+  m_device_config = new k_api::DeviceConfig::DeviceConfigClient(m_router);
   m_base = new k_api::Base::BaseClient(m_router);
   m_base_cyclic = new k_api::BaseCyclic::BaseCyclicClient(m_router_real_time);
 
@@ -365,6 +372,22 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
             : "",
         robot.refJointOrder().size());
   }
+
+  // How the cyclic commands reach the actuators
+  std::string low_level_type =
+      kortexConfig("low_level_type", std::string("base"));
+  if (low_level_type == "base") {
+    m_low_level_type = LowLevelType::Base;
+  } else if (low_level_type == "bypass") {
+    m_low_level_type = LowLevelType::Bypass;
+    discoverBypassDevices();
+  } else {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[mc_kortex] {} robot: unknown low_level_type \"{}\", expected base "
+        "or bypass",
+        m_name, low_level_type);
+  }
+  m_actuator_state_tick.assign(m_actuator_count, -1);
 
   m_filter_command.assign(m_actuator_count, 0.0);
   m_filter_command_w_gain.assign(m_actuator_count, 0.0);
@@ -459,6 +482,7 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_max_missed_refresh =
       std::max(1, static_cast<int>(kortexConfig("max_missed_refresh", 20)));
   m_actuator_counter.assign(m_actuator_count, 0.0);
+  m_actuator_rtt_us.assign(m_actuator_count, 0.0);
 
   // Initialize state
   updateState();
@@ -561,6 +585,10 @@ void KinovaRobot::addLogEntry(mc_control::MCGlobalController &gc) {
       "kortex_frame_id", [this]() { return static_cast<int64_t>(m_frame_id); });
   gc.controller().logger().addLogEntry("kortex_actuator_counter",
                                        [this]() { return m_actuator_counter; });
+  if (m_low_level_type == LowLevelType::Bypass) {
+    gc.controller().logger().addLogEntry(
+        "kortex_actuator_rtt_us", [this]() { return m_actuator_rtt_us; });
+  }
   gc.controller().logger().addLogEntry("kortex_mode_switch_ms",
                                        [this]() { return m_mode_switch_ms; });
   gc.controller().logger().addLogEntry("kortex_mode_switch_pending", [this]() {
@@ -639,6 +667,7 @@ void KinovaRobot::removeLogEntry(mc_control::MCGlobalController &gc) {
   gc.controller().logger().removeLogEntry("kortex_refresh_missed");
   gc.controller().logger().removeLogEntry("kortex_frame_id");
   gc.controller().logger().removeLogEntry("kortex_actuator_counter");
+  gc.controller().logger().removeLogEntry("kortex_actuator_rtt_us");
   gc.controller().logger().removeLogEntry("kortex_mode_switch_ms");
   gc.controller().logger().removeLogEntry("kortex_mode_switch_pending");
   if (m_torque_control_type == mc_kinova::TorqueControlType::Custom) {
@@ -667,81 +696,143 @@ void KinovaRobot::removeLogEntry(mc_control::MCGlobalController &gc) {
 
 void KinovaRobot::updateState() { m_state = m_base_cyclic->RefreshFeedback(); }
 
+namespace {
+
+template <typename T>
+using ReplyPtr = std::shared_ptr<mc_kinova::KinovaRobot::Reply<T>>;
+
+// A new reply slot, and the callback that fills it. The callback only holds
+// the slot: it may run after the exchange was given up, safely
+template <typename T>
+std::pair<ReplyPtr<T>, std::function<void(const k_api::Error &, const T &)>>
+makeReply() {
+  auto reply = std::make_shared<mc_kinova::KinovaRobot::Reply<T>>();
+  auto callback = [reply](const k_api::Error &error, const T &value) {
+    // CLOCK_MONOTONIC, as GetTickUs()
+    reply->arrival_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    if (error.error_code() == k_api::ErrorCodes::ERROR_NONE) {
+      reply->value = value;
+      reply->ok = true;
+    } else {
+      reply->error = k_api::ErrorCodes_Name(error.error_code());
+    }
+    reply->done.store(true, std::memory_order_release);
+  };
+  return {reply, callback};
+}
+
+template <typename T> bool isDone(const ReplyPtr<T> &reply) {
+  return reply && reply->done.load(std::memory_order_acquire);
+}
+
+// Whether the exchange got all its replies
+bool exchangeComplete(const mc_kinova::KinovaRobot::PendingExchange &exchange) {
+  if (exchange.feedback && !isDone(exchange.feedback))
+    return false;
+  for (const auto &actuator : exchange.actuators) {
+    if (actuator && !isDone(actuator))
+      return false;
+  }
+  return !exchange.interconnect || isDone(exchange.interconnect);
+}
+
+} // namespace
+
 void KinovaRobot::sendCommand() {
-  const k_api::RouterClientSendOptions options{false, 0, m_refresh_timeout_ms};
   m_tick++;
   int64_t now = GetTickUs();
   if (m_last_send_us != 0)
     m_dt = now - m_last_send_us;
   m_last_send_us = now;
+  PendingExchange exchange;
+  exchange.send_us = now;
+  exchange.tick = m_tick;
   try {
-    PendingExchange exchange;
-    exchange.send_us = now;
-    exchange.tick = m_tick;
     if (m_has_command) {
       // Incrementing identifier ensures actuators can reject out of time
       // frames (same scheme as Kinova's ros2 driver)
       m_frame_id = (m_frame_id + 1) & 0xFFFF;
-      m_base_command.set_frame_id(m_frame_id);
-      for (int i = 0; i < m_actuator_count; i++)
-        m_base_command.mutable_actuators(i)->set_command_id(m_frame_id);
-      exchange.feedback =
-          m_base_cyclic->Refresh_async(m_base_command, 0, options);
-    } else {
-      exchange.feedback = m_base_cyclic->RefreshFeedback_async(0, options);
     }
-    m_pending.push_back(std::move(exchange));
+    if (m_low_level_type == LowLevelType::Base) {
+      auto [reply, callback] = makeReply<k_api::BaseCyclic::Feedback>();
+      exchange.feedback = reply;
+      if (m_has_command) {
+        m_base_command.set_frame_id(m_frame_id);
+        for (int i = 0; i < m_actuator_count; i++)
+          m_base_command.mutable_actuators(i)->set_command_id(m_frame_id);
+        m_base_cyclic->Refresh_callback(m_base_command, callback, 0);
+      } else {
+        m_base_cyclic->RefreshFeedback_callback(callback, 0);
+      }
+    } else {
+      // Each actuator and the interconnect get their part of the arm command,
+      // all at once. The actuator echoes command_id back as feedback_id
+      auto message_id = k_api::ActuatorCyclic::MessageId();
+      message_id.set_identifier(m_frame_id);
+      for (int i = 0; i < m_actuator_count; i++) {
+        auto *cyclic = m_bypass_actuators[i].cyclic;
+        auto [reply, callback] = makeReply<k_api::ActuatorCyclic::Feedback>();
+        exchange.actuators.push_back(reply);
+        if (m_has_command) {
+          const auto &arm_command = m_base_command.actuators(i);
+          k_api::ActuatorCyclic::Command command;
+          command.mutable_command_id()->set_identifier(m_frame_id);
+          // Servoing enabled, set by the base when it relays the commands
+          command.set_flags(k_api::ActuatorCyclic::SERVO_ENABLE);
+          command.set_position(arm_command.position());
+          command.set_velocity(arm_command.velocity());
+          command.set_torque_joint(arm_command.torque_joint());
+          command.set_current_motor(arm_command.current_motor());
+          cyclic->Refresh_callback(command, callback, 0);
+        } else {
+          cyclic->RefreshFeedback_callback(message_id, callback, 0);
+        }
+      }
+      if (m_bypass_has_interconnect) {
+        auto *interconnect = m_bypass_interconnect.interconnect;
+        auto [reply, callback] =
+            makeReply<k_api::InterconnectCyclic::Feedback>();
+        exchange.interconnect = reply;
+        if (m_has_command) {
+          auto command = m_base_command.interconnect();
+          command.mutable_command_id()->set_identifier(m_frame_id);
+          interconnect->Refresh_callback(command, callback, 0);
+        } else {
+          auto interconnect_id = k_api::InterconnectCyclic::MessageId();
+          interconnect_id.set_identifier(m_frame_id);
+          interconnect->RefreshFeedback_callback(interconnect_id, callback, 0);
+        }
+      }
+    }
   } catch (k_api::KDetailedException &ex) {
     printException(ex);
+  } catch (std::exception &ex) {
+    mc_rtc::log::error("[mc_kortex] {} robot: sending the command: {}", m_name,
+                       ex.what());
   }
+  // Even partially sent: the requests that left must be collected
+  m_pending.push_back(std::move(exchange));
 }
 
 void KinovaRobot::receiveFeedback(int64_t deadline_us, bool &running) {
-  // Wait for this tick's reply, the last one sent, until the deadline.
+  // Wait for this tick's replies, the last exchange sent, until the deadline.
   // Deliberate spin, like the tick itself: a timed wait sleeps past its
   // deadline by up to half a period on a non real-time kernel
   if (!m_pending.empty() && m_pending.back().tick == m_tick) {
-    auto &feedback = m_pending.back().feedback;
-    while (GetTickUs() < deadline_us && feedback.wait_for(std::chrono::seconds(
-                                            0)) != std::future_status::ready) {
+    const auto &exchange = m_pending.back();
+    while (GetTickUs() < deadline_us && !exchangeComplete(exchange)) {
     }
   }
 
-  // Collect every reply that arrived, this tick's or late ones. A reply is
-  // only removed once it completed, so a destroyed future never blocks; the
-  // API completes each one within refresh_timeout_ms, with an error at worst
-  bool updated = false;
+  // Collect every reply that arrived, this tick's or late ones. A request
+  // without reply after refresh_timeout_ms is given up
   bool fresh = false;
-  for (auto it = m_pending.begin(); it != m_pending.end();) {
-    if (it->feedback.wait_for(std::chrono::seconds(0)) !=
-        std::future_status::ready) {
-      ++it;
-      continue;
-    }
-    try {
-      auto feedback = it->feedback.get();
-      // Replies may complete out of order: only keep the most recent command's
-      if (it->tick > m_state_tick) {
-        m_state = std::move(feedback);
-        m_state_tick = it->tick;
-        m_refresh_rtt_us = GetTickUs() - it->send_us;
-        updated = true;
-        fresh = (it->tick == m_tick);
-      }
-    } catch (k_api::KDetailedException &ex) {
-      printException(ex);
-    }
-    it = m_pending.erase(it);
-  }
+  bool updated = (m_low_level_type == LowLevelType::Base)
+                     ? collectBaseFeedback(fresh)
+                     : collectBypassFeedback(fresh);
   m_feedback_age = m_tick - m_state_tick;
-  if (m_pending.size() > 64) {
-    // The API completes every reply within refresh_timeout_ms: replies
-    // piling up mean the link is gone
-    mc_rtc::log::error("[mc_kortex] {} robot: {} exchanges without reply, "
-                       "stopping the controller",
-                       m_name, m_pending.size());
-    running = false;
-  }
 
   if (!updated) {
     // Keep running on the last feedback, the actuators hold the last command
@@ -761,8 +852,110 @@ void KinovaRobot::receiveFeedback(int64_t deadline_us, bool &running) {
     m_late_feedback++;
   for (int i = 0; i < m_actuator_count && i < m_state.actuators_size(); i++)
     m_actuator_counter[i] = m_state.actuators(i).command_id() & 0xFFFF;
-  checkBaseFaultBanks(m_state.base().fault_bank_a(),
-                      m_state.base().fault_bank_b());
+  if (m_low_level_type == LowLevelType::Base) {
+    checkBaseFaultBanks(m_state.base().fault_bank_a(),
+                        m_state.base().fault_bank_b());
+  } else {
+    // The base supervises nothing in bypass: watch every actuator
+    checkActuatorsFaultBanks(m_state);
+  }
+}
+
+bool KinovaRobot::collectBaseFeedback(bool &fresh) {
+  const int64_t now = GetTickUs();
+  bool updated = false;
+  for (auto it = m_pending.begin(); it != m_pending.end();) {
+    auto &reply = it->feedback;
+    if (reply && !isDone(reply)) {
+      if (now - it->send_us <= 1000 * int64_t(m_refresh_timeout_ms)) {
+        ++it;
+        continue;
+      }
+      mc_rtc::log::warning("[mc_kortex] {} robot: no reply after {}ms", m_name,
+                           m_refresh_timeout_ms);
+    } else if (reply && !reply->ok) {
+      mc_rtc::log::warning("[mc_kortex] {} robot: {}", m_name, reply->error);
+    } else if (reply && it->tick > m_state_tick) {
+      // Replies may complete out of order: only keep the most recent
+      // command's
+      m_state = std::move(reply->value);
+      m_state_tick = it->tick;
+      m_refresh_rtt_us = reply->arrival_us - it->send_us;
+      updated = true;
+      fresh = (it->tick == m_tick);
+    }
+    it = m_pending.erase(it);
+  }
+  return updated;
+}
+
+bool KinovaRobot::collectBypassFeedback(bool &fresh) {
+  const int64_t now = GetTickUs();
+  bool updated = false;
+  for (auto it = m_pending.begin(); it != m_pending.end();) {
+    const bool expired =
+        now - it->send_us > 1000 * int64_t(m_refresh_timeout_ms);
+    for (size_t i = 0; i < it->actuators.size(); i++) {
+      auto &reply = it->actuators[i];
+      if (!reply || (!isDone(reply) && !expired))
+        continue;
+      if (!isDone(reply)) {
+        mc_rtc::log::warning("[mc_kortex] {} robot: joint {}: no reply after "
+                             "{}ms",
+                             m_name, i + 1, m_refresh_timeout_ms);
+      } else if (!reply->ok) {
+        mc_rtc::log::warning("[mc_kortex] {} robot: joint {}: {}", m_name,
+                             i + 1, reply->error);
+      } else if (it->tick > m_actuator_state_tick[i]) {
+        // Replies may complete out of order: only keep the most recent
+        // command's, actuator per actuator
+        const auto &feedback = reply->value;
+        m_actuator_state_tick[i] = it->tick;
+        // Same fields as the base relays them, the joint index in the high
+        // bits of command_id as the base reports it
+        auto *actuator = m_state.mutable_actuators(static_cast<int>(i));
+        actuator->set_command_id(
+            (static_cast<uint32_t>(i) << 16) |
+            (feedback.feedback_id().identifier() & 0xFFFF));
+        actuator->set_status_flags(feedback.status_flags());
+        actuator->set_jitter_comm(feedback.jitter_comm());
+        actuator->set_position(feedback.position());
+        actuator->set_velocity(feedback.velocity());
+        actuator->set_torque(feedback.torque());
+        actuator->set_current_motor(feedback.current_motor());
+        actuator->set_voltage(feedback.voltage());
+        actuator->set_temperature_motor(feedback.temperature_motor());
+        actuator->set_temperature_core(feedback.temperature_core());
+        actuator->set_fault_bank_a(feedback.fault_bank_a());
+        actuator->set_fault_bank_b(feedback.fault_bank_b());
+        actuator->set_warning_bank_a(feedback.warning_bank_a());
+        actuator->set_warning_bank_b(feedback.warning_bank_b());
+        m_refresh_rtt_us = reply->arrival_us - it->send_us;
+        m_actuator_rtt_us[i] = static_cast<double>(m_refresh_rtt_us);
+        updated = true;
+      }
+      reply.reset();
+    }
+    auto &interconnect = it->interconnect;
+    if (interconnect && (isDone(interconnect) || expired)) {
+      if (isDone(interconnect) && interconnect->ok &&
+          it->tick > m_interconnect_state_tick) {
+        m_interconnect_state_tick = it->tick;
+        *m_state.mutable_interconnect() = std::move(interconnect->value);
+      }
+      interconnect.reset();
+    }
+    // The exchange is done once every reply was collected or given up
+    bool done = !interconnect;
+    for (const auto &reply : it->actuators)
+      done = done && !reply;
+    it = done ? m_pending.erase(it) : std::next(it);
+  }
+  // The controller runs on the oldest of the actuators' feedback
+  m_state_tick = *std::min_element(m_actuator_state_tick.begin(),
+                                   m_actuator_state_tick.end());
+  fresh = (m_state_tick == m_tick);
+  return updated;
 }
 
 void KinovaRobot::torqueFrictionComputation(
@@ -1248,6 +1441,9 @@ bool KinovaRobot::updateModeSwitch() {
       } catch (k_api::KDetailedException &ex) {
         printException(ex);
         failed = true;
+      } catch (std::exception &ex) {
+        mc_rtc::log::error("[mc_kortex] {} robot: {}", m_name, ex.what());
+        failed = true;
       }
     }
     m_mode_switch.clear();
@@ -1278,26 +1474,51 @@ bool KinovaRobot::updateModeSwitch() {
   m_mode_switch_start_us = GetTickUs();
   try {
     for (int i = 0; i < m_actuator_count; i++) {
-      m_mode_switch.push_back(m_actuator_config->SetControlMode_async(
-          control_mode, i + 1, options));
+      m_mode_switch.push_back(
+          setActuatorControlModeAsync(i, control_mode, options));
     }
   } catch (k_api::KDetailedException &ex) {
     printException(ex);
+    return false;
+  } catch (std::exception &ex) {
+    mc_rtc::log::error("[mc_kortex] {} robot: {}", m_name, ex.what());
     return false;
   }
   return true;
 }
 
+std::future<void> KinovaRobot::setActuatorControlModeAsync(
+    int i, const k_api::ActuatorConfig::ControlModeInformation &control_mode,
+    const k_api::RouterClientSendOptions &options) {
+  if (m_low_level_type == LowLevelType::Bypass &&
+      static_cast<size_t>(i) < m_bypass_actuators.size() &&
+      m_bypass_actuators[i].config != nullptr) {
+    // Straight to the actuator, which is the device of its own connection
+    return m_bypass_actuators[i].config->SetControlMode_async(control_mode, 0,
+                                                              options);
+  }
+  return m_actuator_config->SetControlMode_async(control_mode, i + 1, options);
+}
+
 void KinovaRobot::startControl(mc_control::MCGlobalController &controller) {
-  setLowServoingMode();
+  if (m_low_level_type == LowLevelType::Bypass) {
+    startBypass();
+  } else {
+    setLowServoingMode();
+  }
   addLogEntry(controller);
 }
 
 void KinovaRobot::stopControl(mc_control::MCGlobalController &controller) {
   // Exchanges may still be in flight: let them complete before leaving low
   // level servoing
-  for (auto &exchange : m_pending)
-    exchange.feedback.wait_for(std::chrono::milliseconds(m_refresh_timeout_ms));
+  const int64_t give_up = GetTickUs() + 1000 * int64_t(m_refresh_timeout_ms);
+  while (GetTickUs() < give_up &&
+         std::any_of(m_pending.begin(), m_pending.end(),
+                     [](const PendingExchange &exchange) {
+                       return !exchangeComplete(exchange);
+                     })) {
+  }
   m_pending.clear();
   for (auto &request : m_mode_switch)
     request.wait_for(std::chrono::milliseconds(kModeSwitchTimeoutMs));
@@ -1306,18 +1527,265 @@ void KinovaRobot::stopControl(mc_control::MCGlobalController &controller) {
   removeDatastoreEntries(controller);
   mc_rtc::log::warning("[MC_KORTEX] {} control loop killed", m_name);
 
-  try {
-    auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
-    control_mode.set_control_mode(k_api::ActuatorConfig::ControlMode::POSITION);
-    for (int i = 0; i < m_actuator_count; i++) {
-      m_actuator_config->SetControlMode(control_mode, i + 1);
+  // Nothing below may throw: whatever fails, the base must end up back in
+  // single level servoing
+  auto control_mode = k_api::ActuatorConfig::ControlModeInformation();
+  control_mode.set_control_mode(k_api::ActuatorConfig::ControlMode::POSITION);
+  const k_api::RouterClientSendOptions options{false, 0, kModeSwitchTimeoutMs};
+  std::vector<std::future<void>> requests;
+  for (int i = 0; i < m_actuator_count; i++) {
+    try {
+      requests.push_back(setActuatorControlModeAsync(i, control_mode, options));
+    } catch (std::exception &ex) {
+      mc_rtc::log::error("[MC_KORTEX] {} robot: joint {} back to position "
+                         "control: {}",
+                         m_name, i + 1, ex.what());
     }
-    setSingleServoingMode();
-  } catch (k_api::KDetailedException &ex) {
-    mc_rtc::log::error("[MC_KORTEX] Kortex error: {}", ex.what());
   }
+  for (auto &request : requests) {
+    try {
+      request.get();
+    } catch (std::exception &ex) {
+      mc_rtc::log::error("[MC_KORTEX] {} robot: back to position control: {}",
+                         m_name, ex.what());
+    }
+  }
+  try {
+    setSingleServoingMode();
+  } catch (std::exception &ex) {
+    mc_rtc::log::error("[MC_KORTEX] {} robot: back to single level servoing: "
+                       "{}. Run mc_kortex --diagnostic-reset-servoing",
+                       m_name, ex.what());
+  }
+  disconnectBypassDevices();
 
   removeGui(controller);
+}
+
+void KinovaRobot::discoverBypassDevices() {
+  auto ipv4ToString = [](uint32_t ipv4) {
+    return fmt::format("{}.{}.{}.{}", (ipv4 >> 24) & 0xFF, (ipv4 >> 16) & 0xFF,
+                       (ipv4 >> 8) & 0xFF, ipv4 & 0xFF);
+  };
+  m_bypass_actuators.clear();
+  m_bypass_interconnect = BypassDevice();
+  m_bypass_has_interconnect = false;
+
+  auto devices = m_device_manager->ReadAllDevices();
+  for (int i = 0; i < devices.device_handle_size(); ++i) {
+    const auto &handle = devices.device_handle(i);
+    const auto type = handle.device_type();
+    const bool actuator = type == k_api::Common::BIG_ACTUATOR ||
+                          type == k_api::Common::SMALL_ACTUATOR;
+    const bool interconnect = type == k_api::Common::INTERCONNECT;
+    if (!actuator && !interconnect)
+      continue;
+    BypassDevice device;
+    device.device_id = handle.device_identifier();
+    device.order = handle.order();
+    device.ip_address = ipv4ToString(
+        m_device_config->GetIPv4Settings(handle.device_identifier())
+            .ipv4_address());
+    if (actuator) {
+      m_bypass_actuators.push_back(device);
+    } else {
+      m_bypass_interconnect = device;
+      m_bypass_has_interconnect = true;
+    }
+  }
+  std::sort(m_bypass_actuators.begin(), m_bypass_actuators.end(),
+            [](const BypassDevice &lhs, const BypassDevice &rhs) {
+              return lhs.order < rhs.order;
+            });
+  if (m_bypass_actuators.size() != static_cast<size_t>(m_actuator_count)) {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[mc_kortex] {} robot: found {} actuators to bypass the base for, "
+        "the arm reports {}",
+        m_name, m_bypass_actuators.size(), m_actuator_count);
+  }
+  // The interconnect is only needed to drive the gripper
+  m_bypass_has_interconnect = m_bypass_has_interconnect && gripper_enabled;
+  if (gripper_enabled && !m_bypass_has_interconnect) {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[mc_kortex] {} robot: no interconnect found to drive the gripper in "
+        "bypass",
+        m_name);
+  }
+  for (size_t i = 0; i < m_bypass_actuators.size(); i++) {
+    mc_rtc::log::info("[mc_kortex] {} robot: bypass actuator {} at {} (device "
+                      "{}, order {})",
+                      m_name, i + 1, m_bypass_actuators[i].ip_address,
+                      m_bypass_actuators[i].device_id,
+                      m_bypass_actuators[i].order);
+  }
+  if (m_bypass_has_interconnect) {
+    mc_rtc::log::info("[mc_kortex] {} robot: bypass interconnect at {} "
+                      "(device {})",
+                      m_name, m_bypass_interconnect.ip_address,
+                      m_bypass_interconnect.device_id);
+  }
+}
+
+void KinovaRobot::startBypass() {
+  auto error_callback = [](k_api::KError err) {
+    mc_rtc::log::error("_________ callback error _________ {}", err.toString());
+  };
+
+  // What the base reports, just before it leaves the loop: the actuators'
+  // own feedback must match it, the rest of mc_kortex relies on the base's
+  // conventions
+  auto base_feedback = m_base_cyclic->RefreshFeedback();
+
+  auto servoing_mode = k_api::Base::ServoingModeInformation();
+  servoing_mode.set_servoing_mode(k_api::Base::ServoingMode::BYPASS_SERVOING);
+  m_base->SetServoingMode(servoing_mode);
+  if (m_base->GetServoingMode().servoing_mode() !=
+      k_api::Base::ServoingMode::BYPASS_SERVOING) {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "[mc_kortex] {} robot: the base did not enter bypass servoing", m_name);
+  }
+  m_servoing_mode = k_api::Base::ServoingMode::BYPASS_SERVOING;
+  mc_rtc::log::info("[mc_kortex] {} robot: base in bypass servoing", m_name);
+
+  auto connect = [&](BypassDevice &device) {
+    device.transport = new k_api::TransportClientUdp();
+    device.transport->connect(device.ip_address, m_port);
+    device.router = new k_api::RouterClient(device.transport, error_callback);
+  };
+
+  auto message_id = k_api::ActuatorCyclic::MessageId();
+  message_id.set_identifier(0);
+  auto command_mode = k_api::ActuatorConfig::CommandModeInformation();
+  command_mode.set_command_mode(k_api::ActuatorConfig::CYCLIC);
+  auto servoing = k_api::ActuatorConfig::Servoing();
+  servoing.set_enabled(true);
+
+  mc_rtc::log::info("[mc_kortex] {} robot: base and actuator feedback before "
+                    "control (position deg, torque Nm, current A)",
+                    m_name);
+  for (int i = 0; i < m_actuator_count; i++) {
+    auto &device = m_bypass_actuators[i];
+    connect(device);
+    device.config =
+        new k_api::ActuatorConfig::ActuatorConfigClient(device.router);
+    device.cyclic =
+        new k_api::ActuatorCyclic::ActuatorCyclicClient(device.router);
+
+    k_api::ActuatorCyclic::Feedback feedback;
+    try {
+      feedback = device.cyclic->RefreshFeedback(message_id);
+    } catch (std::exception &ex) {
+      mc_rtc::log::error_and_throw<std::runtime_error>(
+          "[mc_kortex] {} robot: joint {} does not answer at {} ({}). The "
+          "actuators are on the arm's internal network: this computer needs a "
+          "route to it through the base, e.g. sudo ip route add {}/24 via {}",
+          m_name, i + 1, device.ip_address, ex.what(),
+          device.ip_address.substr(0, device.ip_address.rfind('.')) + ".0",
+          m_ip_address);
+    }
+    const auto &base = base_feedback.actuators(i);
+    double position_error =
+        std::remainder(feedback.position() - base.position(), 360.0);
+    mc_rtc::log::info("[mc_kortex]   joint {}: position {:8.3f} / {:8.3f}  "
+                      "torque {:7.3f} / {:7.3f}  current {:6.3f} / {:6.3f}  "
+                      "(base / actuator)",
+                      i + 1, base.position(), feedback.position(),
+                      base.torque(), feedback.torque(), base.current_motor(),
+                      feedback.current_motor());
+    // The arm holds still meanwhile: a large difference, or a flipped sign,
+    // means the actuators report in another convention than the base
+    bool torque_mismatch =
+        std::abs(feedback.torque() - base.torque()) >
+        std::max(1.0, 0.2 * std::abs(static_cast<double>(base.torque())));
+    if (std::abs(position_error) > 0.5 || torque_mismatch) {
+      mc_rtc::log::warning(
+          "[mc_kortex] {} robot: joint {} reports a different state through "
+          "the base and directly (position difference {:.3f} deg, torque {} / "
+          "{} Nm): check the conventions before controlling in torque",
+          m_name, i + 1, position_error, base.torque(), feedback.torque());
+    }
+    if (feedback.fault_bank_a() != 0 || feedback.fault_bank_b() != 0) {
+      mc_rtc::log::warning("[mc_kortex] {} robot: joint {} has faults before "
+                           "bypass, clearing them",
+                           m_name, i + 1);
+    }
+
+    // As in Kinova's low level bypass example: clear the faults, take cyclic
+    // commands, enable servoing, then a first command holding the actuator
+    device.config->ClearFaults();
+    device.config->SetCommandMode(command_mode);
+    // SetServoing right after the command mode change fails with a server
+    // protocol error on some actuators: give it time, and retry
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int attempt = 1;; attempt++) {
+      try {
+        device.config->SetServoing(servoing);
+        break;
+      } catch (std::exception &ex) {
+        if (attempt == 5) {
+          throw;
+        }
+        mc_rtc::log::warning("[mc_kortex] {} robot: joint {} SetServoing "
+                             "attempt {} failed: {}",
+                             m_name, i + 1, attempt, ex.what());
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+
+    k_api::ActuatorCyclic::Command command;
+    command.mutable_command_id()->set_identifier(0);
+    command.set_flags(k_api::ActuatorCyclic::SERVO_ENABLE);
+    command.set_position(feedback.position());
+    command.set_velocity(0.0);
+    command.set_current_motor(feedback.current_motor());
+    feedback = device.cyclic->Refresh(command);
+
+    // Start from the actuators' own feedback
+    auto *actuator = m_state.mutable_actuators(i);
+    actuator->set_command_id(static_cast<uint32_t>(i) << 16);
+    actuator->set_position(feedback.position());
+    actuator->set_velocity(feedback.velocity());
+    actuator->set_torque(feedback.torque());
+    actuator->set_current_motor(feedback.current_motor());
+    actuator->set_fault_bank_a(feedback.fault_bank_a());
+    actuator->set_fault_bank_b(feedback.fault_bank_b());
+  }
+
+  if (m_bypass_has_interconnect) {
+    connect(m_bypass_interconnect);
+    m_bypass_interconnect.interconnect =
+        new k_api::InterconnectCyclic::InterconnectCyclicClient(
+            m_bypass_interconnect.router);
+    auto interconnect_id = k_api::InterconnectCyclic::MessageId();
+    interconnect_id.set_identifier(0);
+    *m_state.mutable_interconnect() =
+        m_bypass_interconnect.interconnect->RefreshFeedback(interconnect_id);
+  }
+  mc_rtc::log::success("[mc_kortex] {} robot: controlling the actuators "
+                       "directly, bypassing the base",
+                       m_name);
+}
+
+void KinovaRobot::disconnectBypassDevices() {
+  auto disconnect = [](BypassDevice &device) {
+    if (device.router)
+      device.router->SetActivationStatus(false);
+    if (device.transport)
+      device.transport->disconnect();
+    delete device.config;
+    delete device.cyclic;
+    delete device.interconnect;
+    delete device.router;
+    delete device.transport;
+    device.config = nullptr;
+    device.cyclic = nullptr;
+    device.interconnect = nullptr;
+    device.router = nullptr;
+    device.transport = nullptr;
+  };
+  for (auto &device : m_bypass_actuators)
+    disconnect(device);
+  disconnect(m_bypass_interconnect);
 }
 
 void KinovaRobot::moveToHomePosition() {
