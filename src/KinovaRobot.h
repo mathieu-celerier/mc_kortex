@@ -189,8 +189,8 @@ private:
   std::vector<double> m_offsets;
 
   double m_mu;
-  double m_friction_vel_threshold;
-  double m_friction_accel_threshold;
+  double m_friction_vel_threshold = 0.01;
+  double m_friction_accel_threshold = 100;
   std::vector<double> m_stiction_values;
   std::vector<double> m_friction_values;
   std::vector<double> m_viscous_values;

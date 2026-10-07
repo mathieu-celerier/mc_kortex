@@ -407,6 +407,11 @@ void KinovaRobot::init(mc_control::MCGlobalController &gc,
   m_offsets.assign(m_actuator_count, 0.0);
   tau_fric.setZero(m_actuator_count);
   m_lambda.assign(m_actuator_count, 0.0);
+  // Friction defaults: buildCommand computes the friction torque in every
+  // control mode, setCustomTorque only overrides these in custom mode
+  m_stiction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
+  m_friction_values = {3.0, 3.0, 3.0, 3.0, 1.25, 1.25, 1.25};
+  m_viscous_values = {2.416, 2.416, 2.416, 2.416, 1.1, 1.1, 1.1};
   m_integral_slow_theta = 1.0;
   m_integral_slow_gain = 1e-2;
 
