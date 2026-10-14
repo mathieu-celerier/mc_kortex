@@ -191,8 +191,17 @@ rate, then waits for its feedback until `feedback_wait_us` into the tick (the
 arms exchange in parallel). The controller runs on that feedback and the
 resulting command leaves at the next tick. A reply that misses the deadline is
 used at a later tick, the controller meanwhile runs on the last feedback it
-got, so the send rate never depends on the reply time. The following entries
-measure the exchange:
+got, so the send rate never depends on the reply time.
+
+![One tick: the command leaves, its feedback is awaited until the deadline, then the controller runs](doc/control-loop/tick-reply-in-time.svg)
+
+The whole tick, from the send to the next command built, must fit in 1 ms:
+`send + min(round trip, feedback_wait_us) + controller ≤ 1000 µs`. A longer
+tick starts the next one late and eventually skips ticks. See
+[`doc/control-loop.md`](doc/control-loop.md) for diagrams of each case: late
+replies, bypass, overruns, `feedback_wait_us: 0` and timeouts.
+
+The following entries measure the exchange:
 
 | Log entry | Meaning |
 |---|---|
