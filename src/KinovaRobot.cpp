@@ -1435,9 +1435,12 @@ bool KinovaRobot::updateModeSwitch() {
           std::future_status::ready) {
         if (GetTickUs() - m_mode_switch_start_us >
             1000 * kModeSwitchTimeoutMs) {
-          mc_rtc::log::error("[mc_kortex] {} robot: control mode change to {} "
-                             "not acknowledged after {}ms",
-                             m_name, m_mode_switch_mode, kModeSwitchTimeoutMs);
+          mc_rtc::log::error(
+              "[mc_kortex] {} robot: control mode change to {} "
+              "not acknowledged after {}ms",
+              m_name,
+              k_api::ActuatorConfig::ControlMode_Name(m_mode_switch_mode),
+              kModeSwitchTimeoutMs);
           return false;
         }
         return true;
@@ -1459,14 +1462,17 @@ bool KinovaRobot::updateModeSwitch() {
     m_mode_switch_ms =
         static_cast<double>(GetTickUs() - m_mode_switch_start_us) / 1000;
     if (failed) {
-      mc_rtc::log::error("[mc_kortex] {} robot: control mode change to {} "
-                         "failed",
-                         m_name, m_mode_switch_mode);
+      mc_rtc::log::error(
+          "[mc_kortex] {} robot: control mode change to {} "
+          "failed",
+          m_name, k_api::ActuatorConfig::ControlMode_Name(m_mode_switch_mode));
       return false;
     }
-    mc_rtc::log::info("[mc_kortex] {} robot: control mode changed to {} in "
-                      "{:.1f}ms",
-                      m_name, m_mode_switch_mode, m_mode_switch_ms);
+    mc_rtc::log::info(
+        "[mc_kortex] {} robot: control mode changed to {} in "
+        "{:.1f}ms",
+        m_name, k_api::ActuatorConfig::ControlMode_Name(m_mode_switch_mode),
+        m_mode_switch_ms);
     m_prev_control_mode_id = m_mode_switch_id;
   }
 
@@ -1477,7 +1483,7 @@ bool KinovaRobot::updateModeSwitch() {
   control_mode.set_control_mode(m_control_mode);
   const k_api::RouterClientSendOptions options{false, 0, kModeSwitchTimeoutMs};
   mc_rtc::log::info("[mc_kortex] {} robot: changing control mode to {}", m_name,
-                    m_control_mode);
+                    k_api::ActuatorConfig::ControlMode_Name(m_control_mode));
   m_mode_switch_id = m_control_mode_id;
   m_mode_switch_mode = m_control_mode;
   m_mode_switch_start_us = GetTickUs();
